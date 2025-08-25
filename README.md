@@ -68,6 +68,14 @@ python legged_gym/scripts/train.py --task=h1int --headless
 To visualize a trained policy, run:
 ```bash
 python legged_gym/scripts/play.py --task=h1int
+python legged_gym/scripts/play.py --task=h1int --headless --load_run=Aug21_13-31-13_ --checkpoint=40000
+python /cpfs/user/caozhe/workspace/HugWBC/legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --num_constant 1 --num_switch 1
+python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 4096 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
+python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 4096 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20000 --num_switch 80000
+CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 4096 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_constant 20000 --num_switch 80000
 ```
 
 ### Sim2Sim & Sim2Real Evaluation
