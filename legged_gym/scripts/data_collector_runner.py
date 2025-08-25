@@ -5,16 +5,135 @@ from typing import Dict, List, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, Future
 import threading
 import time
+import queue
 
 import numpy as np
+import zarr
 
 # ensure local repo is importable
 sys.path.append(os.getcwd())
-
+from tqdm import tqdm
 from legged_gym.envs import *  # registers tasks
 from legged_gym.utils import task_registry
+from legged_gym.dataset.replay_buffer import ReplayBuffer
 import torch
 from isaacgym.torch_utils import torch_rand_float
+
+
+class ReplayBufferWriter:
+    def __init__(self, zarr_path: str, traj_type: str, stop_event: threading.Event, max_queue_size: int = 8):
+        self.zarr_path = zarr_path
+        self.traj_type = traj_type  # "constant" or "switch"
+        self.stop_event = stop_event
+        self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max_queue_size)
+        self.thread = threading.Thread(target=self._run, name=f"ReplayWriter-{traj_type}", daemon=True)
+        self._started = False
+
+    def start(self):
+        if not self._started:
+            self._started = True
+            self.thread.start()
+
+    def join(self):
+        if not self._started:
+            return
+        # drain remaining items
+        self.queue.join()
+
+    def put_batch(self, batch: Dict[str, Any]):
+        # blocks if queue full
+        self.queue.put(batch)
+
+    def _open_or_repair(self) -> ReplayBuffer:
+        try:
+            return ReplayBuffer.create_from_path(self.zarr_path, mode="a")
+        except AssertionError as e:
+            print(f"[ReplayBufferWriter-{self.traj_type}] detected mismatched lengths, attempting repair: {e}")
+            group = zarr.open(self.zarr_path, mode="a")
+            meta = group["meta"]
+            if "episode_ends" not in meta or meta["episode_ends"].size == 0:
+                # empty meta, reset dataset
+                del group["data"]
+                del group["meta"]
+                return ReplayBuffer.create_from_path(self.zarr_path, mode="a")
+            target = int(meta["episode_ends"][-1])
+            data_grp = group.get("data", None)
+            if data_grp is not None:
+                for key, arr in data_grp.items():
+                    if arr.shape[0] != target:
+                        print(f"[Repair] Truncating {key} from {arr.shape[0]} to {target}")
+                        arr.resize((target,) + arr.shape[1:])
+            # done, reopen
+            return ReplayBuffer.create_from_path(self.zarr_path, mode="a")
+
+    def _run(self):
+        # Open or create zarr replay buffer (with repair if needed)
+        buffer = self._open_or_repair()
+        while True:
+            try:
+                item = self.queue.get(timeout=0.1)
+            except queue.Empty:
+                if self.stop_event.is_set():
+                    break
+                continue
+            try:
+                episodes: List[Dict[str, Any]] = item["episodes"]
+                t0 = time.time()
+                # Build bulk arrays by concatenating along time dimension
+                lengths = np.array([len(ep["data"]["obs"]) for ep in episodes], dtype=np.int64)
+                total_T = int(lengths.sum())
+
+                # Collect and concat keys present
+                # we now split obs into proprio/commands/clock ahead of time
+                data_keys = ["proprio", "commands", "clock", "critic_obs", "actions", "rewards", "dones", "root_states"]
+                concat_data: Dict[str, np.ndarray] = {}
+                for key in data_keys:
+                    arrays = []
+                    for ep in episodes:
+                        arr = ep["data"].get(key, None)
+                        if arr is None:
+                            arrays = []
+                            break
+                        if not isinstance(arr, np.ndarray):
+                            arr = np.asarray(arr)
+                        arrays.append(arr)
+                    if arrays:
+                        concat_data[key] = np.concatenate(arrays, axis=0)
+
+                # Append all step data in one call
+                if concat_data:
+                    buffer.add_chunked_data(concat_data)
+
+                # Compute episode_ends based on current steps
+                curr_steps = buffer.n_steps
+                start_steps = curr_steps
+                episode_ends = start_steps + np.cumsum(lengths)
+
+                # Build per-episode meta
+                rewards = np.array([float(ep["meta"].get("reward", 0.0)) for ep in episodes], dtype=np.float32)
+                if self.traj_type == "switch":
+                    cmd_A = np.stack([np.asarray(ep["meta"]["command_A"], dtype=np.float32) for ep in episodes])
+                    cmd_B = np.stack([np.asarray(ep["meta"].get("command_B", np.zeros_like(cmd_A[0])), dtype=np.float32) for ep in episodes])
+                    meta_bulk = {
+                        "episode_ends": episode_ends.astype(np.int64),
+                        "episode_reward": rewards,
+                        "episode_command_A": cmd_A,
+                        "episode_command_B": cmd_B,
+                    }
+                else:
+                    cmd = np.stack([np.asarray(ep["meta"]["command"], dtype=np.float32) for ep in episodes])
+                    meta_bulk = {
+                        "episode_ends": episode_ends.astype(np.int64),
+                        "episode_reward": rewards,
+                        "episode_command": cmd,
+                    }
+                buffer.add_chunked_meta(meta_bulk)
+
+                dt = time.time() - t0
+                print(f"[ReplayBufferWriter-{self.traj_type}] wrote {len(episodes)} episodes (T={total_T}) in {dt:.3f}s (total_eps={buffer.n_episodes})")
+            finally:
+                self.queue.task_done()
+        # flush done
 
 
 class TrajectoryDataCollector:
@@ -25,33 +144,31 @@ class TrajectoryDataCollector:
         headless: bool = True,
         load_checkpoint: Optional[str] = None,
         output_root: str = "collected_trajectories_v2",
+        flush_episodes: int = 4096,
+        max_learning_iter: int = 40000,
     ) -> None:
         self.task_name = task_name
         self.num_envs = num_envs
         self.headless = headless
         self.load_checkpoint = load_checkpoint
         self.output_root = output_root
+        self.flush_episodes = flush_episodes
+        self.max_learning_iter = max_learning_iter
 
-        # Thread pool for concurrent data saving
-        num_cpus = os.cpu_count()
-        self.thread_pool = ThreadPoolExecutor(max_workers=num_cpus, thread_name_prefix="DataSaver")
-        self.pending_tasks: List[Future] = []
-        self.task_lock = threading.Lock()
-        self.max_pending_tasks = num_envs  # Maximum pending tasks before blocking
+        # Saving via ReplayBuffer writers (two buffers: constant and switch)
+        os.makedirs(self.output_root, exist_ok=True)
+        self.constant_rb_path = os.path.join(self.output_root, "constant.zarr")
+        self.switch_rb_path = os.path.join(self.output_root, "switch.zarr")
+        self._stop_event = threading.Event()
+        # queue size small to apply backpressure
+        self.constant_writer = ReplayBufferWriter(self.constant_rb_path, "constant", self._stop_event, max_queue_size=8)
+        self.switch_writer = ReplayBufferWriter(self.switch_rb_path, "switch", self._stop_event, max_queue_size=8)
+        self.constant_writer.start()
+        self.switch_writer.start()
 
-        self.constant_dir = os.path.join(self.output_root, "constant")
-        self.switch_dir = os.path.join(self.output_root, "switch")
-        os.makedirs(self.constant_dir, exist_ok=True)
-        os.makedirs(self.switch_dir, exist_ok=True)
-
-        self.constant_meta_path = os.path.join(self.constant_dir, "meta_info.json")
-        self.switch_meta_path = os.path.join(self.switch_dir, "meta_info.json")
-        self.constant_meta: Dict[str, Dict] = self._load_meta(self.constant_meta_path)
-        self.switch_meta: Dict[str, Dict] = self._load_meta(self.switch_meta_path)
-
-        # per-env trajectory counters per type
-        self.constant_counts: Dict[int, int] = {}
-        self.switch_counts: Dict[int, int] = {}
+        # per-type accumulation before flush
+        self._accum_constant: List[Dict[str, Any]] = []
+        self._accum_switch: List[Dict[str, Any]] = []
 
         # create env with 10s episode
         self.env_cfg, self.train_cfg = task_registry.get_cfgs(name=self.task_name)
@@ -72,9 +189,11 @@ class TrajectoryDataCollector:
             {"name": "--num_switch", "type": int, "default": 0},
             {"name": "--load_checkpoint", "type": str},
             {"name": "--output_root", "type": str},
+            {"name": "--flush_episodes", "type": int, "default": self.flush_episodes},
         ])
         args.headless = self.headless or getattr(args, "headless", False)
         args.num_envs = self.num_envs
+        self.flush_episodes = getattr(args, "flush_episodes", self.flush_episodes)
 
         self.env, _ = task_registry.make_env(name=self.task_name, args=args, env_cfg=self.env_cfg)
         self.device = self.env.device
@@ -93,63 +212,11 @@ class TrajectoryDataCollector:
         # reset once to init buffers
         _, _ = self.env.reset()
 
-    def _wait_for_task_queue(self) -> None:
-        """Wait until the number of pending tasks is less than num_envs"""
-        while True:
-            with self.task_lock:
-                # Clean up completed tasks
-                self.pending_tasks = [task for task in self.pending_tasks if not task.done()]
-                if len(self.pending_tasks) < self.max_pending_tasks:
-                    break
-            # Wait a bit before checking again
+    def _wait_for_queue(self, which: str) -> None:
+        # backpressure: block when queue is too full (>= num_envs)
+        q = self.constant_writer.queue if which == "constant" else self.switch_writer.queue
+        while q.qsize() >= self.num_envs:
             time.sleep(0.01)
-
-    def _submit_save_task(self, data: Dict[str, Any], fpath: str, meta_entry: Dict[str, Any], 
-                         trajectory_type: str, fname: str) -> Future:
-        """Submit a data saving task to the thread pool"""
-        def save_data():
-            try:
-                np.savez_compressed(fpath, **data)
-                return fname, meta_entry
-            except Exception as e:
-                print(f"Error saving {fpath}: {e}")
-                return None
-
-        # Wait if too many pending tasks
-        self._wait_for_task_queue()
-        
-        # Submit task
-        with self.task_lock:
-            future = self.thread_pool.submit(save_data)
-            self.pending_tasks.append(future)
-            return future
-
-    def _load_meta(self, path: str) -> Dict[str, Dict]:
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
-        return {}
-
-    def _save_meta(self) -> None:
-        with open(self.constant_meta_path, "w") as f:
-            json.dump(self.constant_meta, f, indent=2)
-        with open(self.switch_meta_path, "w") as f:
-            json.dump(self.switch_meta, f, indent=2)
-
-    def _get_next_index(self, env_id: int, is_switch: bool) -> int:
-        if is_switch:
-            if env_id not in self.switch_counts:
-                self.switch_counts[env_id] = 0
-            self.switch_counts[env_id] += 1
-            return self.switch_counts[env_id] - 1
-        else:
-            if env_id not in self.constant_counts:
-                self.constant_counts[env_id] = 0
-            self.constant_counts[env_id] += 1
-            return self.constant_counts[env_id] - 1
 
     def _get_actions(self) -> torch.Tensor:
         if self.policy is not None:
@@ -169,14 +236,10 @@ class TrajectoryDataCollector:
         use_curriculum = getattr(self.env.cfg.commands, "curriculum", False)
 
         if use_curriculum:
-            # Use curriculum grid to sample vx/yaw; it internally sets:
-            # - self.commands[env_ids, 0] (vx)
-            # - self.commands[env_ids, 1] (vy, limited)
-            # - self.commands[env_ids, 2] (yaw)
-            # and updates internal curriculum state/weights.
+            # Use curriculum grid to sample vx/yaw
             self.env.update_command_curriculum_grid(env_ids)
 
-            # Fill remaining command dimensions (3..9) consistent with env logic.
+            # Fill remaining command dimensions (3..9)
             gait_freq = torch_rand_float(cfg_ranges.gait_frequency[0], cfg_ranges.gait_frequency[1], (len(env_ids), 1), device=self.device).squeeze(1)
             phases = torch.tensor([0.0, 0.5], device=self.device)
             rand_idx = torch.randint(0, len(phases), (len(env_ids), ), device=self.device)
@@ -265,8 +328,8 @@ class TrajectoryDataCollector:
             if self.env.cfg.env.observe_waist_roll:
                 self.env.commands[env_ids, 9] = waist_roll
 
-    def _collect_episode(self, trajectory_type: str) -> Tuple[List[str], List[float]]:
-        """Collect a single episode for all environments"""
+    def _collect_episode(self, trajectory_type: str) -> Tuple[List[Dict[str, Any]], List[float]]:
+        """Collect a single episode for all environments and return episodes list"""
         # Reset environment
         obs, critic_obs = self.env.reset()
         
@@ -287,7 +350,7 @@ class TrajectoryDataCollector:
         else:
             # For constant trajectories, cmd_B is not used
             cmd_B = None
-        
+
         # Initialize buffers
         obs_buffers = [[] for _ in range(self.env.num_envs)]
         critic_obs_buffers = [[] for _ in range(self.env.num_envs)]
@@ -296,10 +359,11 @@ class TrajectoryDataCollector:
         done_buffers = [[] for _ in range(self.env.num_envs)]
         root_buffers = [[] for _ in range(self.env.num_envs)]
         cmd_buffers = [[] for _ in range(self.env.num_envs)]
+        clock_buffers = [[] for _ in range(self.env.num_envs)]
         
         # Track active environments
         active_mask = torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device)
-        
+
         # Episode loop
         t = 0
         max_steps = int(self.env_cfg.env.episode_length_s / self.env.dt)
@@ -326,6 +390,11 @@ class TrajectoryDataCollector:
                 done_buffers[eid].append(bool(dones[eid].item()))
                 root_buffers[eid].append(self.env.root_states[eid].detach().cpu().numpy())
                 cmd_buffers[eid].append(self.env.commands[eid].detach().cpu().numpy())
+                # clock inputs (2-dim per env)
+                if hasattr(self.env, 'clock_inputs'):
+                    clock_buffers[eid].append(self.env.clock_inputs[eid].detach().cpu().numpy())
+                else:
+                    clock_buffers[eid].append(np.zeros((2,), dtype=np.float32))
 
             t += 1
             # inactivate envs that are done at this step
@@ -335,95 +404,142 @@ class TrajectoryDataCollector:
             if (~active_mask).all():
                 break
 
-        # finalize and save per-env
-        saved_files: List[str] = []
+        # finalize: build episodes
+        episodes: List[Dict[str, Any]] = []
         saved_rewards: List[float] = []
-        save_futures: List[Future] = []
 
         for eid in range(self.env.num_envs):
-            traj_len = len(obs_buffers[eid])
             traj_rew = float(sum(rew_buffers[eid]))
             saved_rewards.append(traj_rew)
 
-            b_idx = self._get_next_index(eid, is_switch=(trajectory_type == "switch"))
-            fname = f"{eid}_{b_idx}_{np.round(traj_rew, 2)}.npz"
-            out_dir = self.switch_dir if trajectory_type == "switch" else self.constant_dir
-            fpath = os.path.join(out_dir, fname)
+            # Split obs into proprio (first part), commands (middle), clock (last 2)
+            obs_arr = np.array(obs_buffers[eid])
+            # obs_arr shape could be (T, H, D) or (T, D); handle generically
+            obs_dim = obs_arr.shape[-1]
+            cmd_dim = int(self.env.cfg.commands.num_commands)
+            clock_dim = 2
+            proprio_dim = int(obs_dim - (cmd_dim + clock_dim))
+            proprio_arr = obs_arr[..., :proprio_dim]
+            commands_from_obs_arr = obs_arr[..., proprio_dim: proprio_dim + cmd_dim]
+            clock_from_obs_arr = obs_arr[..., -clock_dim:]
+            # further split proprio into (true_proprio, history_action)
+            hist_act_dim = int(self.env.num_actions)
+            if proprio_arr.shape[-1] >= hist_act_dim:
+                true_proprio_arr = proprio_arr[..., :-hist_act_dim]
+                history_action_arr = proprio_arr[..., -hist_act_dim:]
+            else:
+                true_proprio_arr = proprio_arr
+                history_action_arr = np.zeros(proprio_arr.shape[:-1] + (hist_act_dim,), dtype=proprio_arr.dtype)
 
             data = {
-                "obs": np.array(obs_buffers[eid]),
+                # split obs components
+                "proprio": true_proprio_arr,
+                "history_action": history_action_arr,
+                "commands": commands_from_obs_arr,
+                "clock": clock_from_obs_arr,
+                # other step data
                 "critic_obs": np.array(critic_obs_buffers[eid]),
                 "actions": np.array(act_buffers[eid]),
-                "rewards": np.array(rew_buffers[eid]),
-                "dones": np.array(done_buffers[eid]),
+                "rewards": np.array(rew_buffers[eid], dtype=np.float32),
+                "dones": np.array(done_buffers[eid], dtype=bool),
                 "root_states": np.array(root_buffers[eid]),
-                "commands": np.array(cmd_buffers[eid]),
-                "dt": self.env.dt,
             }
 
-            meta_entry = {
-                "length": traj_len,
+            meta_entry: Dict[str, Any] = {
                 "reward": traj_rew,
-                "commands": [],
             }
             if trajectory_type == "switch":
-                meta_entry["commands"].append(cmd_A[eid].detach().cpu().numpy().tolist())
-                meta_entry["commands"].append(cmd_B[eid].detach().cpu().numpy().tolist())
+                meta_entry["command_A"] = cmd_A[eid].detach().cpu().numpy().tolist()
+                meta_entry["command_B"] = cmd_B[eid].detach().cpu().numpy().tolist() if cmd_B is not None else None
             else:
-                meta_entry["commands"].append(cmd_A[eid].detach().cpu().numpy().tolist())
+                meta_entry["command"] = cmd_A[eid].detach().cpu().numpy().tolist()
 
-            # Submit save task to thread pool
-            future = self._submit_save_task(data, fpath, meta_entry, trajectory_type, fname)
-            save_futures.append(future)
-            saved_files.append(fname)
-
-        # Wait for all save tasks to complete and update metadata
-        for future in save_futures:
-            try:
-                result = future.result()
-                if result is not None:
-                    fname, meta_entry = result
-                    if trajectory_type == "switch":
-                        self.switch_meta[fname] = meta_entry
-                    else:
-                        self.constant_meta[fname] = meta_entry
-            except Exception as e:
-                print(f"Error in save task: {e}")
-
-        # Remove completed tasks from pending list
-        with self.task_lock:
-            self.pending_tasks = [task for task in self.pending_tasks if not task.done()]
+            episodes.append({"data": data, "meta": meta_entry})
 
         # allow curriculum tick
-        self.env.training_curriculum()
-        return saved_files, saved_rewards
+        self.env.training_curriculum(num_steps=self.curriculum_factor)
+        return episodes, saved_rewards
+
+    def _flush_if_needed(self, which: str) -> None:
+        if which == "constant" and len(self._accum_constant) >= self.flush_episodes:
+            # print queue size before enqueue
+            print(f"[Collector] constant queue size before put: {self.constant_writer.queue.qsize()} (accum={len(self._accum_constant)})")
+            self._wait_for_queue("constant")
+            batch = {"episodes": self._accum_constant[:self.flush_episodes]}
+            self.constant_writer.put_batch(batch)
+            print(f"[Collector] constant queue size after put: {self.constant_writer.queue.qsize()}")
+            self._accum_constant = self._accum_constant[self.flush_episodes:]
+        elif which == "switch" and len(self._accum_switch) >= self.flush_episodes:
+            print(f"[Collector] switch queue size before put: {self.switch_writer.queue.qsize()} (accum={len(self._accum_switch)})")
+            self._wait_for_queue("switch")
+            batch = {"episodes": self._accum_switch[:self.flush_episodes]}
+            self.switch_writer.put_batch(batch)
+            print(f"[Collector] switch queue size after put: {self.switch_writer.queue.qsize()}")
+            self._accum_switch = self._accum_switch[self.flush_episodes:]
+
+    def _final_flush(self) -> None:
+        if len(self._accum_constant) > 0:
+            print(f"[Collector] final flush constant (accum={len(self._accum_constant)}) queue={self.constant_writer.queue.qsize()}")
+            self._wait_for_queue("constant")
+            self.constant_writer.put_batch({"episodes": self._accum_constant})
+            self._accum_constant = []
+        if len(self._accum_switch) > 0:
+            print(f"[Collector] final flush switch (accum={len(self._accum_switch)}) queue={self.switch_writer.queue.qsize()}")
+            self._wait_for_queue("switch")
+            self.switch_writer.put_batch({"episodes": self._accum_switch})
+            self._accum_switch = []
+        # wait writers
+        self.constant_writer.join()
+        self.switch_writer.join()
 
     def collect(self, num_constant: int, num_switch: int) -> None:
+        max_learning_iter = self.max_learning_iter
+        total_eps_num = (num_constant + num_switch) * self.num_envs
+        self.curriculum_factor = max_learning_iter / total_eps_num
         try:
-            for _ in range(num_constant):
-                self._collect_episode("constant")
-                self._save_meta()
-            for _ in range(num_switch):
-                self._collect_episode("switch")
-                self._save_meta()
-        finally:
-            # Ensure all pending tasks complete before shutdown
-            self._wait_for_all_tasks()
-            self.thread_pool.shutdown(wait=True)
+            produced_const = 0
+            produced_switch = 0
+            step = 0
+            while produced_const < num_constant or produced_switch < num_switch:
+                # decide which type to collect next to balance distribution across curriculum
+                if produced_const >= num_constant:
+                    next_type = "switch"
+                elif produced_switch >= num_switch:
+                    next_type = "constant"
+                else:
+                    # proportional fairness: pick the type that is behind in its quota
+                    # compare produced_const/num_constant vs produced_switch/num_switch without floats
+                    if produced_const * num_switch <= produced_switch * num_constant:
+                        next_type = "constant"
+                    else:
+                        next_type = "switch"
 
-    def _wait_for_all_tasks(self) -> None:
-        """Wait for all pending tasks to complete"""
-        while True:
-            with self.task_lock:
-                self.pending_tasks = [task for task in self.pending_tasks if not task.done()]
-                if len(self.pending_tasks) == 0:
-                    break
-            time.sleep(0.01)
+                if next_type == "constant":
+                    print(f"[Collector] step {step} collecting constant ({produced_const+1}/{num_constant}) | q_const={self.constant_writer.queue.qsize()} q_switch={self.switch_writer.queue.qsize()}")
+                    episodes, _ = self._collect_episode("constant")
+                    self._accum_constant.extend(episodes)
+                    self._flush_if_needed("constant")
+                    produced_const += 1
+                else:
+                    print(f"[Collector] step {step} collecting switch ({produced_switch+1}/{num_switch}) | q_const={self.constant_writer.queue.qsize()} q_switch={self.switch_writer.queue.qsize()}")
+                    episodes, _ = self._collect_episode("switch")
+                    self._accum_switch.extend(episodes)
+                    self._flush_if_needed("switch")
+                    produced_switch += 1
+
+                step += 1
+        finally:
+            # Ensure all pending batches complete before shutdown
+            self._final_flush()
+            self._stop_event.set()
 
     def __del__(self):
-        """Cleanup thread pool on destruction"""
-        if hasattr(self, 'thread_pool'):
-            self.thread_pool.shutdown(wait=False)
+        # signal stop and flush
+        try:
+            self._stop_event.set()
+            self._final_flush()
+        except Exception:
+            pass
 
 
 def main():
@@ -436,6 +552,7 @@ def main():
     parser.add_argument("--output_root", type=str, default="collected_trajectories_v2")
     parser.add_argument("--num_constant", type=int, default=10)
     parser.add_argument("--num_switch", type=int, default=10)
+    parser.add_argument("--flush_episodes", type=int, default=4096)
     args = parser.parse_args()
 
     collector = TrajectoryDataCollector(
@@ -444,6 +561,8 @@ def main():
         headless=args.headless,
         load_checkpoint=args.load_checkpoint,
         output_root=args.output_root,
+        flush_episodes=args.flush_episodes,
+        max_learning_iter=40000,
     )
     collector.collect(args.num_constant, args.num_switch)
 

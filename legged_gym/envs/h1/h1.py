@@ -1500,8 +1500,8 @@ class H1Robot(BaseTask):
             self.gym.set_rigid_body_color(
                 env, actor, 0, gymapi.MESH_VISUAL, color_rgb[color])
     
-    def training_curriculum(self):
-        super().training_curriculum()
+    def training_curriculum(self, num_steps=1):
+        super().training_curriculum(num_steps=1)
         if self.cfg.rewards.penalize_curriculum and (self.learning_iter % 100 == 0):
             self.curriculum_scale = pow(self.curriculum_scale, self.cfg.rewards.penalize_curriculum_sigma)
 

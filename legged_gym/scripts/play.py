@@ -115,7 +115,6 @@ def play(args):
     # 执行一步，获取初始观察
     obs, critic_obs, _, _, _ = env.step(torch.zeros(
             env.num_envs, env.num_actions, dtype=torch.float, device=env.device))
-    import debugpy; debugpy.listen(5678); print("debugpy to be attached"); debugpy.wait_for_client()
 
     # ==================== 主循环：策略执行和相机控制 ====================
     timesteps = env_cfg.env.episode_length_s * 500 + 1

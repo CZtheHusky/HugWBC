@@ -73,9 +73,17 @@ python /cpfs/user/caozhe/workspace/HugWBC/legged_gym/scripts/data_collector_runn
 python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 4096 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
 python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 4096 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20000 --num_switch 80000
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
-  --task h1int --num_envs 4096 --headless \
+  --task h1int --num_envs 4000 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
-  --num_constant 20000 --num_switch 80000
+  --num_constant 5 --num_switch 20
+CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 1000 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_constant 20 --num_switch 80
+CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 4 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_constant 1 --num_switch 1
 ```
 
 ### Sim2Sim & Sim2Real Evaluation
