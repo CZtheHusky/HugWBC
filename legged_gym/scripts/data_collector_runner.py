@@ -80,12 +80,13 @@ class ReplayBufferWriter:
                 episodes: List[Dict[str, Any]] = item["episodes"]
                 t0 = time.time()
                 # Build bulk arrays by concatenating along time dimension
-                lengths = np.array([len(ep["data"]["obs"]) for ep in episodes], dtype=np.int64)
+                lengths = np.array([len(ep["data"]["proprio"]) for ep in episodes], dtype=np.int64)
                 total_T = int(lengths.sum())
 
                 # Collect and concat keys present
                 # we now split obs into proprio/commands/clock ahead of time
-                data_keys = ["proprio", "commands", "clock", "critic_obs", "actions", "rewards", "dones", "root_states"]
+                data_keys = ["proprio","history_action","commands","clock","critic_obs","actions","rewards","dones","root_states"]
+
                 concat_data: Dict[str, np.ndarray] = {}
                 for key in data_keys:
                     arrays = []
