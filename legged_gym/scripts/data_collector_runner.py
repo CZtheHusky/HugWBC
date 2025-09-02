@@ -18,7 +18,42 @@ from legged_gym.utils import task_registry
 from legged_gym.dataset.replay_buffer import ReplayBuffer
 import torch
 from isaacgym.torch_utils import torch_rand_float
+import shutil
 
+# Actor MLP: MlpAdaptModel(
+#   (state_estimator): Sequential(
+#     (0): Linear(in_features=32, out_features=64, bias=True)
+#     (1): ELU(alpha=1.0)
+#     (2): Linear(in_features=64, out_features=32, bias=True)
+#     (3): ELU(alpha=1.0)
+#     (4): Linear(in_features=32, out_features=3, bias=True)
+#   )
+#   (low_level_net): Sequential(
+#     (0): Linear(in_features=111, out_features=256, bias=True)
+#     (1): ELU(alpha=1.0)
+#     (2): Linear(in_features=256, out_features=128, bias=True)
+#     (3): ELU(alpha=1.0)
+#     (4): Linear(in_features=128, out_features=32, bias=True)
+#     (5): ELU(alpha=1.0)
+#     (6): Linear(in_features=32, out_features=19, bias=True)
+#   )
+#   (mem_encoder): Sequential(
+#     (0): Linear(in_features=315, out_features=256, bias=True)
+#     (1): ELU(alpha=1.0)
+#     (2): Linear(in_features=256, out_features=128, bias=True)
+#     (3): ELU(alpha=1.0)
+#     (4): Linear(in_features=128, out_features=32, bias=True)
+#   )
+# )
+# Critic MLP: Sequential(
+#   (0): Linear(in_features=321, out_features=512, bias=True)
+#   (1): ELU(alpha=1.0)
+#   (2): Linear(in_features=512, out_features=256, bias=True)
+#   (3): ELU(alpha=1.0)
+#   (4): Linear(in_features=256, out_features=128, bias=True)
+#   (5): ELU(alpha=1.0)
+#   (6): Linear(in_features=128, out_features=1, bias=True)
+# )
 
 class ReplayBufferWriter:
     def __init__(self, zarr_path: str, traj_type: str, stop_event: threading.Event, max_queue_size: int = 8):
@@ -85,7 +120,7 @@ class ReplayBufferWriter:
 
                 # Collect and concat keys present
                 # we now split obs into proprio/commands/clock ahead of time
-                data_keys = ["proprio","history_action","commands","clock","critic_obs","actions","rewards","dones","root_states"]
+                data_keys = ["proprio","commands","clock","critic_obs","actions","rewards","dones","root_states"]
 
                 concat_data: Dict[str, np.ndarray] = {}
                 for key in data_keys:
@@ -103,7 +138,7 @@ class ReplayBufferWriter:
 
                 # Append all step data in one call
                 if concat_data:
-                    buffer.add_chunked_data(concat_data)
+                    buffer.add_chunked_data(concat_data, target_chunk_bytes=1024 * 1024 * 1024 * 2)
 
                 # Compute episode_ends based on current steps
                 curr_steps = buffer.n_steps
@@ -128,7 +163,7 @@ class ReplayBufferWriter:
                         "episode_reward": rewards,
                         "episode_command": cmd,
                     }
-                buffer.add_chunked_meta(meta_bulk)
+                buffer.add_chunked_meta(meta_bulk, target_chunk_bytes=1024 * 1024 * 1024 * 2)
 
                 dt = time.time() - t0
                 print(f"[ReplayBufferWriter-{self.traj_type}] wrote {len(episodes)} episodes (T={total_T}) in {dt:.3f}s (total_eps={buffer.n_episodes})")
@@ -137,35 +172,72 @@ class ReplayBufferWriter:
         # flush done
 
 
+def _parse_merged_args():
+    from isaacgym import gymutil
+    # merge helpers.get_args() custom_parameters with collector-specific ones
+    base_custom_parameters = [
+        {"name": "--task", "type": str, "default": "h1int", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
+        {"name": "--resume", "action": "store_true", "default": True,  "help": "Resume training from a checkpoint"},
+        {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
+        {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
+        {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
+        {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
+        {"name": "--headless", "action": "store_true", "default": True, "help": "Force display off at all times"},
+        {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
+        {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
+        {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
+        {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
+        {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
+        {"name": "--sim_joystick", "action": "store_true", "default": False, "help": "Sample commands from sim joystick"},
+    ]
+    collector_parameters = [
+        {"name": "--load_checkpoint", "type": str},
+        {"name": "--output_root", "type": str, "default": "test"},
+        {"name": "--num_total", "type": int, "default": 10},
+        {"name": "--const_prob", "type": float, "default": 0.2},
+        {"name": "--switch_prob", "type": float, "default": 0.8},
+        {"name": "--flush_episodes", "type": int, "default": 1000},
+        {"name": "--episode_length_s", "type": float, "default": 10.0},
+    ]
+    args = gymutil.parse_arguments(
+        description="Trajectory Data Collector",
+        custom_parameters=base_custom_parameters + collector_parameters,
+    )
+    # align names like helpers.get_args
+    args.sim_device_id = args.compute_device_id
+    args.sim_device = args.sim_device_type
+    if args.sim_device == 'cuda':
+        args.sim_device += f":{args.sim_device_id}"
+    return args
+
+
 class TrajectoryDataCollector:
     def __init__(
         self,
-        task_name: str = "h1int",
-        num_envs: int = 4,
-        headless: bool = True,
-        load_checkpoint: Optional[str] = None,
-        output_root: str = "collected_trajectories_v2",
-        flush_episodes: int = 4096,
+        args: Optional[Any] = None,
         max_learning_iter: int = 40000,
     ) -> None:
-        self.task_name = task_name
-        self.num_envs = num_envs
-        self.headless = headless
-        self.load_checkpoint = load_checkpoint
-        self.output_root = output_root
-        self.flush_episodes = flush_episodes
+        self.args = args if args is not None else _parse_merged_args()
+        self.task_name = getattr(self.args, "task", "h1int")
+        self.num_envs = getattr(self.args, "num_envs", 4) or 4
+        self.headless = bool(getattr(self.args, "headless", True))
+        self.load_checkpoint = getattr(self.args, "load_checkpoint", None)
+        self.output_root = getattr(self.args, "output_root", "collected")
+        self.flush_episodes = int(getattr(self.args, "flush_episodes", 1000))
         self.max_learning_iter = max_learning_iter
 
         # Saving via ReplayBuffer writers (two buffers: constant and switch)
-        os.makedirs(self.output_root, exist_ok=True)
         self.constant_rb_path = os.path.join(self.output_root, "constant.zarr")
         self.switch_rb_path = os.path.join(self.output_root, "switch.zarr")
+        if os.path.exists(self.output_root):
+            to_remove = input(f"Remove existing directory {self.output_root}? (y/n)")
+            if to_remove == "y":
+                shutil.rmtree(self.output_root)
+            else:
+                print("Warning: directory already exists, writing after it.")
+        os.makedirs(self.output_root, exist_ok=True)
+
         self._stop_event = threading.Event()
-        # queue size small to apply backpressure
-        self.constant_writer = ReplayBufferWriter(self.constant_rb_path, "constant", self._stop_event, max_queue_size=8)
-        self.switch_writer = ReplayBufferWriter(self.switch_rb_path, "switch", self._stop_event, max_queue_size=8)
-        self.constant_writer.start()
-        self.switch_writer.start()
 
         # per-type accumulation before flush
         self._accum_constant: List[Dict[str, Any]] = []
@@ -174,29 +246,15 @@ class TrajectoryDataCollector:
         # create env with 10s episode
         self.env_cfg, self.train_cfg = task_registry.get_cfgs(name=self.task_name)
         self.env_cfg.env.num_envs = self.num_envs
-        self.env_cfg.env.episode_length_s = 10.0
+        self.env_cfg.env.episode_length_s = args.episode_length_s
 
         # prevent in-episode command resampling; we will control commands manually
-        self.env_cfg.commands.resampling_time = 10.0  # still equals episode length; first step won't hit modulo
+        self.env_cfg.commands.resampling_time = 100.0  # still equals episode length; first step won't hit modulo
 
-        # build args and env
-        from isaacgym import gymutil
-        args = gymutil.parse_arguments(description="Trajectory Data Collector", custom_parameters=[
-            {"name": "--task", "type": str, "default": self.task_name},
-            {"name": "--num_envs", "type": int, "default": self.num_envs},
-            {"name": "--headless", "action": "store_true", "default": self.headless},
-            # allow extra CLI flags so gymutil doesn't error out
-            {"name": "--num_constant", "type": int, "default": 0},
-            {"name": "--num_switch", "type": int, "default": 0},
-            {"name": "--load_checkpoint", "type": str},
-            {"name": "--output_root", "type": str},
-            {"name": "--flush_episodes", "type": int, "default": self.flush_episodes},
-        ])
-        args.headless = self.headless or getattr(args, "headless", False)
-        args.num_envs = self.num_envs
-        self.flush_episodes = getattr(args, "flush_episodes", self.flush_episodes)
-
-        self.env, _ = task_registry.make_env(name=self.task_name, args=args, env_cfg=self.env_cfg)
+        # build env with merged args
+        self.args.headless = self.headless or getattr(self.args, "headless", False)
+        self.args.num_envs = self.num_envs
+        self.env, _ = task_registry.make_env(name=self.task_name, args=self.args, env_cfg=self.env_cfg)
         self.device = self.env.device
 
         # optional policy for actions
@@ -205,10 +263,20 @@ class TrajectoryDataCollector:
             try:
                 self.train_cfg.runner.resume = True
                 self.train_cfg.runner.resume_path = self.load_checkpoint
-                ppo_runner, _ = task_registry.make_alg_runner(env=self.env, name=self.task_name, args=args, train_cfg=self.train_cfg, log_root=None)
+                ppo_runner, _ = task_registry.make_alg_runner(env=self.env, name=self.task_name, args=self.args, train_cfg=self.train_cfg, log_root=None)
                 self.policy = ppo_runner.get_inference_policy(device=self.device)
-            except Exception:
+            except Exception as e:
+                print(f"Error loading checkpoint: {e}")
+                raise e
                 self.policy = None
+
+        # queue size small to apply backpressure
+        if args.const_prob > 0:
+            self.constant_writer = ReplayBufferWriter(self.constant_rb_path, "constant", self._stop_event, max_queue_size=8)
+            self.constant_writer.start()
+        if args.switch_prob > 0:
+            self.switch_writer = ReplayBufferWriter(self.switch_rb_path, "switch", self._stop_event, max_queue_size=8)
+            self.switch_writer.start()
 
         # reset once to init buffers
         _, _ = self.env.reset()
@@ -220,13 +288,11 @@ class TrajectoryDataCollector:
             time.sleep(0.01)
 
     def _get_actions(self) -> torch.Tensor:
-        if self.policy is not None:
-            with torch.inference_mode():
-                obs = self.env.get_observations()
-                critic_obs = self.env.get_privileged_observations()
-                actions, _ = self.policy.act_inference(obs, privileged_obs=critic_obs)
-                return actions
-        return torch.zeros(self.env.num_envs, self.env.num_actions, device=self.env.device)
+        with torch.inference_mode():
+            obs = self.env.get_observations()
+            critic_obs = self.env.get_privileged_observations()
+            actions, _ = self.policy.act_inference(obs, privileged_obs=critic_obs)
+            return actions
 
     def _resample_commands(self, env_ids: torch.Tensor) -> None:
         """Resample commands for specified environments.
@@ -339,15 +405,15 @@ class TrajectoryDataCollector:
         self._resample_commands(env_ids)
         
         # Always store the initial commands as cmd_A
-        cmd_A = self.env.commands.clone()
+        cmd_A = self.env.commands.detach()
         
         # For switch trajectories, prepare second command set
         if trajectory_type == "switch":
             # Sample second command set
             self._resample_commands(env_ids)
-            cmd_B = self.env.commands.clone()
+            cmd_B = self.env.commands.detach()
             # Reset to first command set
-            self.env.commands = cmd_A.clone()
+            self.env.commands = cmd_A.detach()
         else:
             # For constant trajectories, cmd_B is not used
             cmd_B = None
@@ -367,25 +433,30 @@ class TrajectoryDataCollector:
 
         # Episode loop
         t = 0
+        command_scales = torch.as_tensor(np.array(
+            [2, 2, 0.25, 1, 1, 1, 0.15, 2.0, 0.5, 0.5, 1]
+        )).to(self.device)
         max_steps = int(self.env_cfg.env.episode_length_s / self.env.dt)
-        
+        last_obs, last_critic_obs, _, _, _ = self.env.step(torch.zeros(self.env.num_envs, self.env.num_actions, dtype=torch.float, device=self.env.device))
+        current_commands = cmd_A.detach()
         while t < max_steps and active_mask.any():
-            # Get actions
-            actions = self._get_actions()
+            with torch.inference_mode():
+                actions, _ = self.policy.act_inference(last_obs, privileged_obs=last_critic_obs)
             
             # Step environment
             obs, critic_obs, step_rewards, dones, infos = self.env.step(actions)
             
             # Switch commands halfway through for switch trajectories
             if trajectory_type == "switch" and t == max_steps // 2:
-                self.env.commands = cmd_B.clone()
+                current_commands = cmd_B.detach() 
+            self.env.commands = current_commands
             
             # Record data for active environments
             for eid in range(self.env.num_envs):
                 if not bool(active_mask[eid]):
                     continue
-                obs_buffers[eid].append(obs[eid].detach().cpu().numpy())
-                critic_obs_buffers[eid].append(critic_obs[eid].detach().cpu().numpy())
+                obs_buffers[eid].append(last_obs[eid].detach().cpu().numpy())
+                critic_obs_buffers[eid].append(last_critic_obs[eid].detach().cpu().numpy())
                 act_buffers[eid].append(actions[eid].detach().cpu().numpy())
                 rew_buffers[eid].append(float(step_rewards[eid].item()))
                 done_buffers[eid].append(bool(dones[eid].item()))
@@ -396,7 +467,8 @@ class TrajectoryDataCollector:
                     clock_buffers[eid].append(self.env.clock_inputs[eid].detach().cpu().numpy())
                 else:
                     clock_buffers[eid].append(np.zeros((2,), dtype=np.float32))
-
+            last_obs = obs.detach()
+            last_critic_obs = critic_obs.detach()
             t += 1
             # inactivate envs that are done at this step
             if dones.any():
@@ -424,18 +496,10 @@ class TrajectoryDataCollector:
             commands_from_obs_arr = obs_arr[..., proprio_dim: proprio_dim + cmd_dim]
             clock_from_obs_arr = obs_arr[..., -clock_dim:]
             # further split proprio into (true_proprio, history_action)
-            hist_act_dim = int(self.env.num_actions)
-            if proprio_arr.shape[-1] >= hist_act_dim:
-                true_proprio_arr = proprio_arr[..., :-hist_act_dim]
-                history_action_arr = proprio_arr[..., -hist_act_dim:]
-            else:
-                true_proprio_arr = proprio_arr
-                history_action_arr = np.zeros(proprio_arr.shape[:-1] + (hist_act_dim,), dtype=proprio_arr.dtype)
 
             data = {
                 # split obs components
-                "proprio": true_proprio_arr,
-                "history_action": history_action_arr,
+                "proprio": proprio_arr,
                 "commands": commands_from_obs_arr,
                 "clock": clock_from_obs_arr,
                 # other step data
@@ -493,42 +557,30 @@ class TrajectoryDataCollector:
         self.constant_writer.join()
         self.switch_writer.join()
 
-    def collect(self, num_constant: int, num_switch: int) -> None:
+    def collect(self, num_total: int, const_prob: float, switch_prob: float) -> None:
         max_learning_iter = self.max_learning_iter
-        total_eps_num = (num_constant + num_switch) * self.num_envs
+        total_eps_num = num_total * self.num_envs
         self.curriculum_factor = max_learning_iter / total_eps_num
+        assert const_prob + switch_prob == 1.0
         try:
+            produced_total = 0
             produced_const = 0
             produced_switch = 0
-            step = 0
-            while produced_const < num_constant or produced_switch < num_switch:
-                # decide which type to collect next to balance distribution across curriculum
-                if produced_const >= num_constant:
-                    next_type = "switch"
-                elif produced_switch >= num_switch:
-                    next_type = "constant"
-                else:
-                    # proportional fairness: pick the type that is behind in its quota
-                    # compare produced_const/num_constant vs produced_switch/num_switch without floats
-                    if produced_const * num_switch <= produced_switch * num_constant:
-                        next_type = "constant"
-                    else:
-                        next_type = "switch"
-
+            while produced_total < num_total:
+                produced_total += 1
+                next_type = "constant" if np.random.rand() < const_prob else "switch"
                 if next_type == "constant":
-                    print(f"[Collector] step {step} collecting constant ({produced_const+1}/{num_constant}) | q_const={self.constant_writer.queue.qsize()} q_switch={self.switch_writer.queue.qsize()}")
-                    episodes, _ = self._collect_episode("constant")
+                    episodes, saved_rewards = self._collect_episode("constant")
+                    print(f"[Collector] collecting constant ({produced_const+1}/{produced_total}) | q_const={self.constant_writer.queue.qsize()} q_switch={self.switch_writer.queue.qsize()} saved_rewards={np.mean(saved_rewards)} saved_rewards_max={np.max(saved_rewards)} saved_rewards_min={np.min(saved_rewards)}")
                     self._accum_constant.extend(episodes)
                     self._flush_if_needed("constant")
                     produced_const += 1
                 else:
-                    print(f"[Collector] step {step} collecting switch ({produced_switch+1}/{num_switch}) | q_const={self.constant_writer.queue.qsize()} q_switch={self.switch_writer.queue.qsize()}")
-                    episodes, _ = self._collect_episode("switch")
+                    episodes, saved_rewards = self._collect_episode("switch")
+                    print(f"[Collector] collecting switch ({produced_switch+1}/{produced_total}) | q_const={self.constant_writer.queue.qsize()} q_switch={self.switch_writer.queue.qsize()} saved_rewards={np.mean(saved_rewards)} saved_rewards_max={np.max(saved_rewards)} saved_rewards_min={np.min(saved_rewards)}")
                     self._accum_switch.extend(episodes)
                     self._flush_if_needed("switch")
                     produced_switch += 1
-
-                step += 1
         finally:
             # Ensure all pending batches complete before shutdown
             self._final_flush()
@@ -544,28 +596,9 @@ class TrajectoryDataCollector:
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Trajectory data collector (runner-style)")
-    parser.add_argument("--task", type=str, default="h1int")
-    parser.add_argument("--num_envs", type=int, default=4)
-    parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--load_checkpoint", type=str, default=None)
-    parser.add_argument("--output_root", type=str, default="collected_trajectories_v2")
-    parser.add_argument("--num_constant", type=int, default=10)
-    parser.add_argument("--num_switch", type=int, default=10)
-    parser.add_argument("--flush_episodes", type=int, default=4096)
-    args = parser.parse_args()
-
-    collector = TrajectoryDataCollector(
-        task_name=args.task,
-        num_envs=args.num_envs,
-        headless=args.headless,
-        load_checkpoint=args.load_checkpoint,
-        output_root=args.output_root,
-        flush_episodes=args.flush_episodes,
-        max_learning_iter=40000,
-    )
-    collector.collect(args.num_constant, args.num_switch)
+    args = _parse_merged_args()
+    collector = TrajectoryDataCollector(args=args, max_learning_iter=40000)
+    collector.collect(args.num_total, args.const_prob, args.switch_prob)
 
 
 if __name__ == "__main__":

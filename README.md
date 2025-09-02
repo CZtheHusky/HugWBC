@@ -31,8 +31,7 @@
 
 First, create and activate a new conda environment:
 ```bash
-conda create -n hugwbc python=3.8 -y
-conda activate hugwbc
+conda create -n hugwbc python=3.8 -y && conda activate hugwbc
 ```
 
 Next, install PyTorch. Please use the command that corresponds to your system's CUDA version. For example, for CUDA 11.8:
@@ -67,11 +66,17 @@ python legged_gym/scripts/train.py --task=h1int --headless
 ### Visualization
 To visualize a trained policy, run:
 ```bash
-python legged_gym/scripts/play.py --task=h1int
+python legged_gym/scripts/play.py --task=h1int  --load_run=Aug21_13-31-13_ --checkpoint=40000
+python legged_gym/scripts/play_ds_check.py --task=h1int  --load_run=Aug21_13-31-13_ --checkpoint=40000 --headless
+python legged_gym/scripts/play_video.py --task=h1int  --load_run=Aug21_13-31-13_ --checkpoint=40000
+python legged_gym/scripts/play_example_gen.py --task=h1int  --load_run=Aug21_13-31-13_ --checkpoint=40000
 python legged_gym/scripts/play.py --task=h1int --headless --load_run=Aug21_13-31-13_ --checkpoint=40000
 python /cpfs/user/caozhe/workspace/HugWBC/legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --num_constant 1 --num_switch 1
-python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 4096 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
-python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 4096 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20000 --num_switch 80000
+python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
+python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 1000 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20 --num_switch 80
+python -m debugpy --listen 5678 --wait-for-client ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 1000 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20 --num_switch 80
+python -m debugpy --listen 5678 --wait-for-client ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
+
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 4000 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
@@ -80,6 +85,16 @@ CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_constant 20 --num_switch 80
+CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 1000 --headless \
+    --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+      --num_constant 20 --num_switch 80
+
+CUDA_VISIBLE_DEVICES=2 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 1000 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --output_root collected_large  \
+  --num_constant 200 --num_switch 800
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 4 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \

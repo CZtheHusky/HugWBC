@@ -45,7 +45,7 @@ def play(args):
 
     # ==================== 命令和奖励设置 ====================
     # 设置命令重采样时间（100秒），减少命令变化频率
-    env_cfg.commands.resampling_time = 100
+    env_cfg.commands.resampling_time = 100000
     # 关闭奖励课程学习，保持固定奖励结构
     env_cfg.rewards.penalize_curriculum = False
     
@@ -118,6 +118,14 @@ def play(args):
 
     # ==================== 主循环：策略执行和相机控制 ====================
     timesteps = env_cfg.env.episode_length_s * 500 + 1
+    switch_interval = 10 # 5 seconds
+    switch_steps = int(switch_interval / env.dt)
+    print(f"switch_steps: {switch_steps}")
+    commands_names = list(CANDATE_ENV_COMMANDS.keys())
+    command_name = commands_names[0]
+    current_command = torch.tensor(np.array(CANDATE_ENV_COMMANDS[command_name]), device=env.device)
+    env.commands[:, :10] = current_command
+    current_reward = 0
     for timestep in tqdm.tqdm(range(timesteps)):
         # 使用推理模式，不计算梯度
         with torch.inference_mode():
@@ -125,8 +133,11 @@ def play(args):
             actions, _ = policy.act_inference(obs, privileged_obs=critic_obs)
 
             # 执行动作，获取新的观察
-            obs, critic_obs, _, _, _ = env.step(actions)
-            
+            obs, critic_obs, reward, dones, _ = env.step(actions)
+            current_reward += reward.item()
+            if dones.any():
+                print(f"command: {command_name}, current reward: {current_reward}")
+                current_reward = 0
             # ==================== 相机动态跟踪 ====================
             # 获取当前机器人位置作为相机焦点
             look_at = np.array(env.root_states[track_index, :3].cpu(), dtype=np.float64)
@@ -145,18 +156,23 @@ def play(args):
             # 更新相机位置
             env.set_camera(look_at + camera_relative_position, look_at, track_index)
 
-            # ==================== 运动命令设置 ====================
-            # 设置机器人运动命令
-            env.commands[:, 0] = 2.0   # 前进速度 (m/s)
-            env.commands[:, 1] = 0     # 侧向速度 (m/s)
-            env.commands[:, 2] = 0     # 角速度 (rad/s)
-            env.commands[:, 3] = 2.0   # 目标高度 (m)
-            env.commands[:, 4] = 0.5   # 其他参数
-            env.commands[:, 5] = 0.5   # 其他参数
-            env.commands[:, 6] = 0.2   # 其他参数
-            env.commands[:, 7] = -0.0  # 其他参数
-            env.commands[:, 8] = 0.0   # 其他参数
-            env.commands[:, 9] = 0.0   # 其他参数
+            # # ==================== 运动命令设置 ====================
+            # # 设置机器人运动命令
+            # env.commands[:, 0] = 2.0   # 前进速度 (m/s)
+            # env.commands[:, 1] = 0     # 侧向速度 (m/s)
+            # env.commands[:, 2] = 0     # 角速度 (rad/s)
+            # env.commands[:, 3] = 2.0   # 目标高度 (m)
+            # env.commands[:, 4] = 0.5   # 其他参数
+            # env.commands[:, 5] = 0.5   # 其他参数
+            # env.commands[:, 6] = 0.2   # 其他参数
+            # env.commands[:, 7] = -0.0  # 其他参数
+            # env.commands[:, 8] = 0.0   # 其他参数
+            # env.commands[:, 9] = 0.0   # 其他参数
+            if timestep % switch_steps == 0:
+                command_name = commands_names[(timestep // switch_steps) % len(commands_names)]
+                current_command = torch.tensor(np.array(CANDATE_ENV_COMMANDS[command_name]), device=env.device)
+                print(f"command: {command_name}, current commands: {current_command}")
+            env.commands[:, :10] = current_command
             
             # ==================== 干扰和中断设置 ====================
             # 启用干扰功能
@@ -172,7 +188,20 @@ def play(args):
             # 设置所有环境为站立模式
             env.standing_envs_mask[:] = True
             # 站立时停止运动（前3个命令设为0）
-            env.commands[env.standing_envs_mask, :3] = 0
+            # env.commands[env.standing_envs_mask, :3] = 0
+
+CANDATE_ENV_COMMANDS = {
+    "default": [0, 0, 0, 2, 0.15, 0.5, 0.2, 0, 0, 0],
+    "slow_backward_walk": [-0.6, 0, 0, 1, 0.15, 0.5, 0.2, 0, 0, 0],
+    "slow_forward_walk": [0.6, 0, 0, 1, 0.15, 0.5, 0.2, 0, 0, 0],
+    "slow_backward_walk_low_height": [-0.6, 0, 0, 1, 0.15, 0.5,-0.3, 0, 0, 0],
+    "slow_forward_walk_low_height": [0.6, 0, 0, 1, 0.15, 0.5, -0.3, 0, 0, 0],
+    "fast_walk": [2, 0, 0, 2.5, 0.15, 0.5, 0.3, 0, 0, 0],
+    "slow_turn": [0.5, 0, -0.5, 1.5, 0.15, 0.5, 0.2, 0, 0, 0],
+    "fast_turn": [0.5, 0, 0.5, 2.5, 0.15, 0.5, 0.2, 0, 0, 0],
+    "crab_right_walk": [0, 0.6, 0, 1.5, 0.15, 0.5, 0.2, 0, 0, 0],
+    "crab_left_walk": [0, -0.6, 0, 1.5, 0.15, 0.5, 0.2, 0, 0, 0],
+}
 
 if __name__ == '__main__':
     args = get_args()

@@ -13,22 +13,9 @@ from isaacgym import gymapi
 
 
 class OnPolicyTestRunner:
-    def __init__(self, task: str, num_envs: int, headless: bool = True, load_checkpoint: str = None,
+    def __init__(self, args, task: str, num_envs: int, headless: bool = True, load_checkpoint: str = None,
                  record_video: bool = False, video_dir: str = "videos/on_policy_test",
                  camera_width: int = 640, camera_height: int = 480, frame_stride: int = 10) -> None:
-        from isaacgym import gymutil
-        args = gymutil.parse_arguments(description="OnPolicyTestRunner (no learning)", custom_parameters=[
-            {"name": "--task", "type": str, "default": task},
-            {"name": "--num_envs", "type": int, "default": num_envs},
-            {"name": "--headless", "action": "store_true", "default": headless},
-            {"name": "--episodes_per_env", "type": int, "default": 1},
-            {"name": "--load_checkpoint", "type": str},
-            {"name": "--record_video", "action": "store_true", "default": record_video},
-            {"name": "--video_dir", "type": str, "default": video_dir},
-            {"name": "--camera_width", "type": int, "default": camera_width},
-            {"name": "--camera_height", "type": int, "default": camera_height},
-            {"name": "--frame_stride", "type": int, "default": frame_stride},
-        ])
         args.headless = headless or getattr(args, "headless", False)
         self._record_video = getattr(args, "record_video", record_video)
         self._video_dir = getattr(args, "video_dir", video_dir)
@@ -45,8 +32,10 @@ class OnPolicyTestRunner:
         self.env, self.env_cfg = task_registry.make_env(name=task, args=args)
         try:
             self.env_cfg.env.episode_length_s = 10.0
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error setting episode length: {e}")
+            raise e
+
         self.device = self.env.device
 
         # optional policy
@@ -59,7 +48,9 @@ class OnPolicyTestRunner:
                 if os.path.isfile(load_checkpoint):
                     train_runner.load(load_checkpoint)
                 self.policy = train_runner.get_inference_policy(device=self.device)
-            except Exception:
+                print("policy:\n", self.policy)
+            except Exception as e:
+                raise e
                 self.policy = None
 
         _, _ = self.env.reset()
@@ -93,10 +84,8 @@ class OnPolicyTestRunner:
             self._frame_idx = 0
 
     def _act(self, obs: torch.Tensor) -> torch.Tensor:
-        if self.policy is not None:
-            with torch.no_grad():
-                return self.policy.act_inference(obs)
-        return torch.zeros(self.env.num_envs, self.env.num_actions, device=self.device)
+        with torch.no_grad():
+            return self.policy.act_inference(obs)
 
     def _update_camera(self):
         if not self._use_viewer:
@@ -137,7 +126,7 @@ class OnPolicyTestRunner:
         critic_obs = self.env.get_privileged_observations()
 
         while done_episodes < total_needed:
-            actions = self._act(obs)
+            actions, _ = self._act(obs)
             step_result = self.env.step(actions)
             if len(step_result) == 4:
                 obs, rewards, dones, infos = step_result
@@ -166,23 +155,48 @@ class OnPolicyTestRunner:
                 # let env handle resets and curriculum
                 self.env.training_curriculum()
 
+def _parse_merged_args():
+    from isaacgym import gymutil
+    # merge helpers.get_args() custom_parameters with collector-specific ones
+    base_custom_parameters = [
+        {"name": "--task", "type": str, "default": "h1int", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
+        {"name": "--resume", "action": "store_true", "default": True,  "help": "Resume training from a checkpoint"},
+        {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
+        {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
+        {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
+        {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
+        {"name": "--headless", "action": "store_true", "default": True, "help": "Force display off at all times"},
+        {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
+        {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
+        {"name": "--num_envs", "type": int, "default": 4, "help": "Number of environments to create. Overrides config file if provided."},
+        {"name": "--seed", "type": int, "default": 0, "help": "Random seed. Overrides config file if provided."},
+        {"name": "--max_iterations", "type": int, "default": 100000, "help": "Maximum number of training iterations. Overrides config file if provided."},
+        {"name": "--sim_joystick", "action": "store_true", "default": False, "help": "Sample commands from sim joystick"},
+    ]
+    collector_parameters = [
+        {"name": "--load_checkpoint", "type": str, "default": "/root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt"},
+        {"name": "--output_root", "type": str, "default": "on_policy_test"},
+        {"name": "--episodes_per_env", "type": int, "default": 2},
+        {"name": "--record_video", "action": "store_true", "default": False},
+        {"name": "--video_dir", "type": str, "default": "videos/on_policy_test"},
+        {"name": "--camera_width", "type": int, "default": 640},
+        {"name": "--camera_height", "type": int, "default": 480},
+        {"name": "--frame_stride", "type": int, "default": 10},
+    ]
+    args = gymutil.parse_arguments(
+        description="Trajectory Data Collector",
+        custom_parameters=base_custom_parameters + collector_parameters,
+    )
+    # align names like helpers.get_args
+    args.sim_device_id = args.compute_device_id
+    args.sim_device = args.sim_device_type
+    if args.sim_device == 'cuda':
+        args.sim_device += f":{args.sim_device_id}"
+    return args
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Run rollouts without learning and print per-env rewards")
-    parser.add_argument("--task", type=str, default="h1int")
-    parser.add_argument("--num_envs", type=int, default=4)
-    parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--episodes_per_env", type=int, default=2)
-    parser.add_argument("--load_checkpoint", type=str, default=None)
-    parser.add_argument("--record_video", action="store_true")
-    parser.add_argument("--video_dir", type=str, default="videos/on_policy_test")
-    parser.add_argument("--camera_width", type=int, default=640)
-    parser.add_argument("--camera_height", type=int, default=480)
-    parser.add_argument("--frame_stride", type=int, default=10)
-    args = parser.parse_args()
-
-    runner = OnPolicyTestRunner(task=args.task, num_envs=args.num_envs, headless=args.headless, load_checkpoint=args.load_checkpoint,
+    args = _parse_merged_args()
+    runner = OnPolicyTestRunner(args, task=args.task, num_envs=args.num_envs, headless=args.headless, load_checkpoint=args.load_checkpoint,
                                 record_video=args.record_video, video_dir=args.video_dir, camera_width=args.camera_width,
                                 camera_height=args.camera_height, frame_stride=args.frame_stride)
     runner.rollout(num_episodes_per_env=args.episodes_per_env)
