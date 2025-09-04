@@ -105,6 +105,8 @@ CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 4 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_constant 1 --num_switch 1
+
+CUDA_VISIBLE_DEVICES=7 python ./legged_gym/scripts/data_collector_runner.py   --task h1int --num_envs 1000 --headless   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt   --num_total 20 --const_prob 1 --switch_prob 0 --episode_length_s 2.5 --output_root new_ds_test --small_chunks --overwrite
 ```
 
 ### Sim2Sim & Sim2Real Evaluation

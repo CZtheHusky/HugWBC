@@ -61,9 +61,12 @@ class ReplayBufferWriter:
         self.traj_type = traj_type  # "constant" or "switch"
         self.stop_event = stop_event
         self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max_queue_size)
-        self.thread = threading.Thread(target=self._run, name=f"ReplayWriter-{traj_type}", daemon=True)
+        self.thread = threading.Thread(target=self._run, name=f"ReplayWriter-{traj_type}", daemon=False)
         self._started = False
+        self.error = None
         self.small_chunks = small_chunks
+        self.data_keys = None
+        self.disk_keys = None
 
     def start(self):
         if not self._started:
@@ -71,10 +74,17 @@ class ReplayBufferWriter:
             self.thread.start()
 
     def join(self):
+        
         if not self._started:
             return
-        # drain remaining items
+        # signal stop to allow thread to break idle waits
+        self.stop_event.set()
+        # wait until all queued items processed
         self.queue.join()
+        # and wait for thread exit
+        if self.thread.is_alive():
+            self.thread.join()
+
 
     def put_batch(self, batch: Dict[str, Any]):
         # blocks if queue full
@@ -103,6 +113,7 @@ class ReplayBufferWriter:
             return ReplayBuffer.create_from_path(self.zarr_path, mode="a")
 
     def _run(self):
+        
         # Open or create zarr replay buffer (with repair if needed)
         buffer = self._open_or_repair()
         while True:
@@ -112,74 +123,92 @@ class ReplayBufferWriter:
                 if self.stop_event.is_set():
                     break
                 continue
-            episodes: List[Dict[str, Any]] = item["episodes"]
-            t0 = time.time()
-            # Build bulk arrays by concatenating along time dimension
-            lengths = np.array([len(ep["data"]["proprio"]) for ep in episodes], dtype=np.int64)
-            total_T = int(lengths.sum())
+            try:
+                episodes: List[Dict[str, Any]] = item["episodes"]
+                t0 = time.time()
+                # Build bulk arrays by concatenating along time dimension
+                lengths = np.array([len(ep["data"]["proprio"]) for ep in episodes], dtype=np.int64)
+                total_T = int(lengths.sum())
 
-            # Collect and concat keys present
-            # we now split obs into proprio/commands/clock ahead of time
-            data_keys = ["commands","clock","actions","rewards","dones","root_states"]
-            if self.small_chunks:
-                disk_keys = ["proprio", "critic_obs"]
-            else:
-                disk_keys = []
-                data_keys.append("proprio")
-                data_keys.append("critic_obs")
-            
-
-            concat_data: Dict[str, np.ndarray] = {}
-            for key in data_keys:
-                arrays = []
-                for ep in episodes:
-                    arr = ep["data"].get(key, None)
-                    if arr is None:
+                # Collect and concat keys present
+                # we now split obs into proprio/commands/clock ahead of time
+                if self.data_keys is None:
+                    data_keys = list(episodes[0]["data"].keys())
+                    if self.small_chunks:
+                        disk_keys = ["proprio", "privileged", "terrain"]
+                        for key in disk_keys:
+                            data_keys.remove(key)
+                    else:
+                        disk_keys = []
+                    self.data_keys = data_keys
+                    self.disk_keys = disk_keys
+                concat_data: Dict[str, np.ndarray] = {}
+                for key in self.data_keys:
                         arrays = []
-                        break
-                    if not isinstance(arr, np.ndarray):
-                        arr = np.asarray(arr)
-                    arrays.append(arr)
-                if arrays:
-                    concat_data[key] = np.concatenate(arrays, axis=0)
+                        for ep in episodes:
+                            arr = ep["data"][key]
+                            if not isinstance(arr, np.ndarray):
+                                arr = np.asarray(arr)
+                            arrays.append(arr)
+                        if arrays:
+                            concat_data[key] = np.concatenate(arrays, axis=0)
 
-            # Append all step data in one call
-            if concat_data:
-                buffer.add_chunked_data(concat_data, target_chunk_bytes=1024 * 1024 * 1024 * 2)
-            for ep in episodes:
-                disk_data = {}
-                for key in disk_keys:
-                    disk_data[key] = np.asarray(ep["data"][key])
-                buffer.add_chunked_data(disk_data, target_chunk_bytes=1024 * 1024 * 2)
+                # Append all step data in one call
+                if concat_data:
+                    # reduce chunk target to avoid huge memory spikes
+                    buffer.add_chunked_data(concat_data, target_chunk_bytes=128 * 1024 * 1024)
 
-            # Compute episode_ends based on current steps
-            curr_steps = buffer.n_steps
-            start_steps = curr_steps
-            episode_ends = start_steps + np.cumsum(lengths)
+                for ep in episodes:
+                    disk_data = {}
+                    for key in self.disk_keys:
+                        disk_data[key] = np.asarray(ep["data"][key])
+                    # set the chunk targe to be 4kb
+                    buffer.add_chunked_data(disk_data, target_chunk_bytes=2 * 1024 * 1024)
 
-            # Build per-episode meta
-            rewards = np.array([float(ep["meta"].get("reward", 0.0)) for ep in episodes], dtype=np.float32)
-            if self.traj_type == "switch":
-                cmd_A = np.stack([np.asarray(ep["meta"]["command_A"], dtype=np.float32) for ep in episodes])
-                cmd_B = np.stack([np.asarray(ep["meta"].get("command_B", np.zeros_like(cmd_A[0])), dtype=np.float32) for ep in episodes])
-                meta_bulk = {
-                    "episode_ends": episode_ends.astype(np.int64),
-                    "episode_reward": rewards,
-                    "episode_command_A": cmd_A,
-                    "episode_command_B": cmd_B,
-                }
+                # Compute episode_ends based on current steps
+                curr_steps = buffer.n_steps
+                start_steps = curr_steps
+                episode_ends = start_steps + np.cumsum(lengths)
+
+                rewards = np.array([ep["meta"]["episode_reward"] for ep in episodes], dtype=np.float32)
+                step_rewards = np.array([ep["meta"]["episode_step_reward"] for ep in episodes], dtype=np.float32)
+                if self.traj_type == "switch":
+                    cmd_A = np.stack([np.asarray(ep["meta"]["episode_command_A"], dtype=np.float32) for ep in episodes])
+                    cmd_B = np.stack([np.asarray(ep["meta"]["episode_command_B"], dtype=np.float32) for ep in episodes])
+                    meta_bulk = {
+                        "episode_ends": episode_ends.astype(np.int64),
+                        "episode_reward": rewards,
+                        "episode_step_reward": step_rewards,
+                        "episode_command_A": cmd_A,
+                        "episode_command_B": cmd_B,
+                    }
+                else:
+                    cmd = np.stack([np.asarray(ep["meta"]["episode_command"], dtype=np.float32) for ep in episodes])
+                    meta_bulk = {
+                        "episode_ends": episode_ends.astype(np.int64),
+                        "episode_reward": rewards,
+                        "episode_step_reward": step_rewards,
+                        "episode_command": cmd,
+                    }
+                buffer.add_chunked_meta(meta_bulk, target_chunk_bytes=64 * 1024 * 1024)
+
+                dt = time.time() - t0
+                print(f"[ReplayBufferWriter-{self.traj_type}] wrote {len(episodes)} episodes (T={total_T}) in {dt:.3f}s (total_eps={buffer.n_episodes})")
+            except Exception as e:
+                # record error so the producer thread can detect it
+                self.error = e
+                # mark this item done to avoid queue.join() deadlock
+                try:
+                    self.queue.task_done()
+                finally:
+                    # propagate to stop quickly
+                    self.stop_event.set()
+                raise
             else:
-                cmd = np.stack([np.asarray(ep["meta"]["command"], dtype=np.float32) for ep in episodes])
-                meta_bulk = {
-                    "episode_ends": episode_ends.astype(np.int64),
-                    "episode_reward": rewards,
-                    "episode_command": cmd,
-                }
-            buffer.add_chunked_meta(meta_bulk, target_chunk_bytes=1024 * 1024 * 1024 * 2)
+                # mark success
+                self.queue.task_done()
+        # graceful exit of thread
 
-            dt = time.time() - t0
-            print(f"[ReplayBufferWriter-{self.traj_type}] wrote {len(episodes)} episodes (T={total_T}) in {dt:.3f}s (total_eps={buffer.n_episodes})")
-        # flush done
 
 
 def _parse_merged_args():
@@ -194,7 +223,7 @@ def _parse_merged_args():
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
         {"name": "--headless", "action": "store_true", "default": True, "help": "Force display off at all times"},
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
-        {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
+        {"name": "--rl_device", "type": str, "default": "cuda", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
         {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
@@ -209,7 +238,10 @@ def _parse_merged_args():
         {"name": "--flush_episodes", "type": int, "default": 1000},
         {"name": "--episode_length_s", "type": float, "default": 10.0},
         {"name": "--small_chunks", "action": "store_true", "default": False},
+        {"name": "--overwrite", "action": "store_true", "default": False},
     ]
+    
+    
     args = gymutil.parse_arguments(
         description="Trajectory Data Collector",
         custom_parameters=base_custom_parameters + collector_parameters,
@@ -234,19 +266,30 @@ class TrajectoryDataCollector:
         self.headless = bool(getattr(self.args, "headless", True))
         self.load_checkpoint = getattr(self.args, "load_checkpoint", None)
         self.output_root = getattr(self.args, "output_root", "collected")
-        self.output_root = os.path.join(self.output_root, "dataset")
+        self.output_root = os.path.join("dataset", self.output_root)
         self.flush_episodes = int(getattr(self.args, "flush_episodes", 1000))
         self.max_learning_iter = max_learning_iter
+        self.proprio_dim = 44
+        self.action_dim = 19
+        self.cmd_dim = 11
+        self.clock_dim = 2
+        self.privileged_dim = 24
+        self.terrain_dim = 221
+        self.total_obs_dim = self.proprio_dim + self.action_dim + self.cmd_dim + self.clock_dim
+        self.total_privileged_dim = self.privileged_dim + self.terrain_dim + self.total_obs_dim
+
+
 
         # Saving via ReplayBuffer writers (two buffers: constant and switch)
         self.constant_rb_path = os.path.join(self.output_root, "constant.zarr")
         self.switch_rb_path = os.path.join(self.output_root, "switch.zarr")
+        print("Save path: ", self.output_root)
         if os.path.exists(self.output_root):
-            to_remove = input(f"Remove existing directory {self.output_root}? (y/n)")
-            if to_remove == "y":
+            if getattr(self.args, "overwrite", False):
+                print(f"[Collector] Removing existing directory: {self.output_root}")
                 shutil.rmtree(self.output_root)
             else:
-                print("Warning: directory already exists, writing after it.")
+                print(f"[Collector] Directory exists: {self.output_root} (appending)")
         os.makedirs(self.output_root, exist_ok=True)
 
         self._stop_event = threading.Event()
@@ -261,7 +304,7 @@ class TrajectoryDataCollector:
         self.env_cfg.env.episode_length_s = args.episode_length_s
 
         # prevent in-episode command resampling; we will control commands manually
-        self.env_cfg.commands.resampling_time = 100.0  # still equals episode length; first step won't hit modulo
+        self.env_cfg.commands.resampling_time = args.episode_length_s * 10  # still equals episode length; first step won't hit modulo
 
         # build env with merged args
         self.args.headless = self.headless or getattr(self.args, "headless", False)
@@ -284,23 +327,26 @@ class TrajectoryDataCollector:
 
         # queue size small to apply backpressure
         if args.const_prob > 0:
-            self.constant_writer = ReplayBufferWriter(self.constant_rb_path, "constant", self._stop_event, max_queue_size=8, small_chunks=args.small_chunks)
+            self.constant_writer = ReplayBufferWriter(self.constant_rb_path, "constant", self._stop_event, max_queue_size=2, small_chunks=args.small_chunks)
             self.constant_writer.start()
         else:
             self.constant_writer = None
         if args.switch_prob > 0:
-            self.switch_writer = ReplayBufferWriter(self.switch_rb_path, "switch", self._stop_event, max_queue_size=8, small_chunks=args.small_chunks)
+            self.switch_writer = ReplayBufferWriter(self.switch_rb_path, "switch", self._stop_event, max_queue_size=2, small_chunks=args.small_chunks)
             self.switch_writer.start()
         else:
             self.switch_writer = None
         # reset once to init buffers
         _, _ = self.env.reset()
 
-    def _wait_for_queue(self, which: str) -> None:
-        # backpressure: block when queue is too full (>= num_envs)
-        q = self.constant_writer.queue if which == "constant" else self.switch_writer.queue
-        while q.qsize() >= 8:
-            time.sleep(0.1)
+    def _check_writers(self):
+        for w in (self.constant_writer, self.switch_writer):
+            if w is None:
+                continue
+            if getattr(w, "error", None) is not None:
+                raise RuntimeError(f"Writer {w.traj_type} crashed") from w.error
+            if not w.thread.is_alive() and w._started:
+                raise RuntimeError(f"Writer {w.traj_type} unexpectedly stopped")
 
     def _get_actions(self) -> torch.Tensor:
         with torch.inference_mode():
@@ -433,15 +479,21 @@ class TrajectoryDataCollector:
             # For constant trajectories, cmd_B is not used
             cmd_B = None
 
-        # Initialize buffers
-        obs_buffers = [[] for _ in range(self.env.num_envs)]
-        critic_obs_buffers = [[] for _ in range(self.env.num_envs)]
-        act_buffers = [[] for _ in range(self.env.num_envs)]
-        rew_buffers = [[] for _ in range(self.env.num_envs)]
-        done_buffers = [[] for _ in range(self.env.num_envs)]
-        root_buffers = [[] for _ in range(self.env.num_envs)]
-        cmd_buffers = [[] for _ in range(self.env.num_envs)]
-        clock_buffers = [[] for _ in range(self.env.num_envs)]
+        # # Initialize buffers
+        # proprio_buffers = [[] for _ in range(self.env.num_envs)]
+        # privileged_buffers = [[] for _ in range(self.env.num_envs)]
+        # terrain_buffers = [[] for _ in range(self.env.num_envs)]
+        # act_buffers = [[] for _ in range(self.env.num_envs)]
+        # rew_buffers = [[] for _ in range(self.env.num_envs)]
+        # done_buffers = [[] for _ in range(self.env.num_envs)]
+        # cmd_buffers = [[] for _ in range(self.env.num_envs)]
+        # clock_buffers = [[] for _ in range(self.env.num_envs)]
+        last_obs_buffers = []
+        last_critic_obs_buffers = []
+        action_buffers = []
+        reward_buffers = []
+        done_buffers = []
+        env_valid_steps = torch.zeros(self.env.num_envs, dtype=torch.int32, device=self.device)
         
         # Track active environments
         active_mask = torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device)
@@ -453,6 +505,10 @@ class TrajectoryDataCollector:
         )).to(self.device)
         max_steps = int(self.env_cfg.env.episode_length_s / self.env.dt)
         last_obs, last_critic_obs, _, _, _ = self.env.step(torch.zeros(self.env.num_envs, self.env.num_actions, dtype=torch.float, device=self.env.device))
+        assert len(last_critic_obs.shape) == 2
+        assert len(last_obs.shape) == 3
+        assert last_obs.shape[-1] == self.total_obs_dim
+        assert last_critic_obs.shape[-1] == self.total_privileged_dim
         current_commands = cmd_A.detach()
         while t < max_steps and active_mask.any():
             with torch.inference_mode():
@@ -465,29 +521,38 @@ class TrajectoryDataCollector:
             if trajectory_type == "switch" and t == max_steps // 2:
                 current_commands = cmd_B.detach() 
             self.env.commands = current_commands
+
+            last_obs_buffers.append(last_obs[:, -1].detach().cpu().numpy())
+            last_critic_obs_buffers.append(last_critic_obs[:, last_obs.shape[-1]:].detach().cpu().numpy())
+            action_buffers.append(actions.detach().cpu().numpy())
+            reward_buffers.append(float(step_rewards.cpu().numpy()))
+            done_buffers.append(bool(dones.cpu().numpy()))
             
-            # Record data for active environments
-            for eid in range(self.env.num_envs):
-                if not bool(active_mask[eid]):
-                    continue
-                obs_buffers[eid].append(last_obs[eid].detach().cpu().numpy())
-                critic_obs_buffers[eid].append(last_critic_obs[eid].detach().cpu().numpy())
-                act_buffers[eid].append(actions[eid].detach().cpu().numpy())
-                rew_buffers[eid].append(float(step_rewards[eid].item()))
-                done_buffers[eid].append(bool(dones[eid].item()))
-                root_buffers[eid].append(self.env.root_states[eid].detach().cpu().numpy())
-                cmd_buffers[eid].append(self.env.commands[eid].detach().cpu().numpy())
-                # clock inputs (2-dim per env)
-                if hasattr(self.env, 'clock_inputs'):
-                    clock_buffers[eid].append(self.env.clock_inputs[eid].detach().cpu().numpy())
-                else:
-                    clock_buffers[eid].append(np.zeros((2,), dtype=np.float32))
+            # # Record data for active environments
+            # for eid in range(self.env.num_envs):
+            #     if not bool(active_mask[eid]):
+            #         continue
+            #     last_proprio = last_obs[eid, -1, :self.proprio_dim].detach().cpu().numpy()
+            #     last_privileged = last_critic_obs[eid, -self.privileged_dim - self.terrain_dim:-self.terrain_dim].detach().cpu().numpy()
+            #     last_terrain = last_critic_obs[eid, -self.terrain_dim:].detach().cpu().numpy()
+            #     last_cmd = last_obs[eid, -1, -self.cmd_dim - self.clock_dim:-self.clock_dim].detach().cpu().numpy()
+            #     last_clock = last_obs[eid, -1, -self.clock_dim:].detach().cpu().numpy()
+            #     proprio_buffers[eid].append(last_proprio)
+            #     privileged_buffers[eid].append(last_privileged)
+            #     terrain_buffers[eid].append(last_terrain)
+            #     cmd_buffers[eid].append(last_cmd)
+            #     clock_buffers[eid].append(last_clock)
+            #     act_buffers[eid].append(actions[eid].detach().cpu().numpy())
+            #     rew_buffers[eid].append(float(step_rewards[eid].item()))
+            #     done_buffers[eid].append(bool(dones[eid].item()))
             last_obs = obs.detach()
             last_critic_obs = critic_obs.detach()
             t += 1
             # inactivate envs that are done at this step
+            env_valid_steps[active_mask] += 1
             if dones.any():
                 active_mask[dones > 0] = False
+            print(env_valid_steps.cpu().numpy())
             # break when all envs finished early
             if (~active_mask).all():
                 break
@@ -495,44 +560,51 @@ class TrajectoryDataCollector:
         # finalize: build episodes
         episodes: List[Dict[str, Any]] = []
         saved_rewards: List[float] = []
-
+        last_obs_buffers = np.stack(last_obs_buffers, axis=1)
+        last_critic_obs_buffers = np.stack(last_critic_obs_buffers, axis=1)
+        action_buffers = np.stack(action_buffers, axis=1)
+        reward_buffers = np.stack(reward_buffers, axis=1, dtype=np.float32)
+        done_buffers = np.stack(done_buffers, axis=1, dtype=bool)
+        assert done_buffers.shape == (self.env.num_envs, max_steps)
+        env_valid_steps = env_valid_steps.cpu().numpy()
         for eid in range(self.env.num_envs):
-            traj_rew = float(sum(rew_buffers[eid]))
+            env_steps = env_valid_steps[eid]
+            traj_reward = reward_buffers[eid, :env_steps]
+
+            traj_proprio = last_obs_buffers[eid, :env_steps, :self.proprio_dim]
+            traj_cmd = last_obs_buffers[eid, :env_steps, -self.cmd_dim - self.clock_dim:-self.clock_dim]
+            traj_clock = last_obs_buffers[eid, :env_steps, -self.clock_dim:]
+
+            traj_privileged = last_critic_obs_buffers[eid, :env_steps, :self.privileged_dim]
+            traj_terrain = last_critic_obs_buffers[eid, :env_steps, self.privileged_dim:]
+
+            traj_action = action_buffers[eid, :env_steps]
+            traj_done = done_buffers[eid, :env_steps]
+
+            traj_rew = float(sum(traj_reward))
+            traj_step_reward = np.mean(traj_reward)
             saved_rewards.append(traj_rew)
-
-            # Split obs into proprio (first part), commands (middle), clock (last 2)
-            obs_arr = np.array(obs_buffers[eid])
-            # obs_arr shape could be (T, H, D) or (T, D); handle generically
-            obs_dim = obs_arr.shape[-1]
-            cmd_dim = int(self.env.cfg.commands.num_commands)
-            clock_dim = 2
-            proprio_dim = int(obs_dim - (cmd_dim + clock_dim))
-            proprio_arr = obs_arr[..., :proprio_dim]
-            commands_from_obs_arr = obs_arr[..., proprio_dim: proprio_dim + cmd_dim]
-            clock_from_obs_arr = obs_arr[..., -clock_dim:]
-            # further split proprio into (true_proprio, history_action)
-
             data = {
-                # split obs components
-                "proprio": proprio_arr,
-                "commands": commands_from_obs_arr,
-                "clock": clock_from_obs_arr,
+                "proprio": np.array(traj_proprio),
+                "commands": np.array(traj_cmd),
+                "clock": np.array(traj_clock),
                 # other step data
-                "critic_obs": np.array(critic_obs_buffers[eid]),
-                "actions": np.array(act_buffers[eid]),
-                "rewards": np.array(rew_buffers[eid], dtype=np.float32),
-                "dones": np.array(done_buffers[eid], dtype=bool),
-                "root_states": np.array(root_buffers[eid]),
+                "privileged": np.array(traj_privileged),
+                "terrain": np.array(traj_terrain),
+                "actions": np.array(traj_action),
+                "rewards": np.array(traj_reward, dtype=np.float32),
+                "dones": np.array(traj_done, dtype=bool),
             }
 
             meta_entry: Dict[str, Any] = {
-                "reward": traj_rew,
+                "episode_reward": traj_rew,
+                "episode_step_reward": traj_step_reward,
             }
             if trajectory_type == "switch":
-                meta_entry["command_A"] = cmd_A[eid].detach().cpu().numpy().tolist()
-                meta_entry["command_B"] = cmd_B[eid].detach().cpu().numpy().tolist() if cmd_B is not None else None
+                meta_entry["episode_command_A"] = cmd_A[eid].cpu().numpy()
+                meta_entry["episode_command_B"] = cmd_B[eid].cpu().numpy()
             else:
-                meta_entry["command"] = cmd_A[eid].detach().cpu().numpy().tolist()
+                meta_entry["episode_command"] = cmd_A[eid].cpu().numpy()
 
             episodes.append({"data": data, "meta": meta_entry})
 
@@ -544,14 +616,12 @@ class TrajectoryDataCollector:
         if which == "constant" and len(self._accum_constant) >= self.flush_episodes:
             # print queue size before enqueue
             print(f"[Collector] constant queue size before put: {self.constant_writer.queue.qsize()} (accum={len(self._accum_constant)})")
-            self._wait_for_queue("constant")
             batch = {"episodes": self._accum_constant[:self.flush_episodes]}
             self.constant_writer.put_batch(batch)
             print(f"[Collector] constant queue size after put: {self.constant_writer.queue.qsize()}")
             self._accum_constant = self._accum_constant[self.flush_episodes:]
         elif which == "switch" and len(self._accum_switch) >= self.flush_episodes:
             print(f"[Collector] switch queue size before put: {self.switch_writer.queue.qsize()} (accum={len(self._accum_switch)})")
-            self._wait_for_queue("switch")
             batch = {"episodes": self._accum_switch[:self.flush_episodes]}
             self.switch_writer.put_batch(batch)
             print(f"[Collector] switch queue size after put: {self.switch_writer.queue.qsize()}")
@@ -560,12 +630,10 @@ class TrajectoryDataCollector:
     def _final_flush(self) -> None:
         if len(self._accum_constant) > 0:
             print(f"[Collector] final flush constant (accum={len(self._accum_constant)}) queue={self.constant_writer.queue.qsize()}")
-            self._wait_for_queue("constant")
             self.constant_writer.put_batch({"episodes": self._accum_constant})
             self._accum_constant = []
         if len(self._accum_switch) > 0:
             print(f"[Collector] final flush switch (accum={len(self._accum_switch)}) queue={self.switch_writer.queue.qsize()}")
-            self._wait_for_queue("switch")
             self.switch_writer.put_batch({"episodes": self._accum_switch})
             self._accum_switch = []
         # wait writers
@@ -578,35 +646,38 @@ class TrajectoryDataCollector:
         max_learning_iter = self.max_learning_iter
         total_eps_num = num_total * self.num_envs
         self.curriculum_factor = max_learning_iter / total_eps_num
-        assert const_prob + switch_prob == 1.0
+        assert abs(const_prob + switch_prob - 1.0) < 1e-6
         try:
             produced_total = 0
             produced_const = 0
             produced_switch = 0
             while produced_total < num_total:
+                self._check_writers()
                 produced_total += 1
                 next_type = "constant" if np.random.rand() < const_prob else "switch"
                 if next_type == "constant":
                     episodes, saved_rewards = self._collect_episode("constant")
                     print(f"[Collector] collecting constant ({produced_const+1}/{produced_total}/{num_total}) | q_const={self.constant_writer.queue.qsize()} saved_rewards={np.mean(saved_rewards)} saved_rewards_max={np.max(saved_rewards)} saved_rewards_min={np.min(saved_rewards)}")
                     self._accum_constant.extend(episodes)
-                    self._flush_if_needed("constant")
+                    self._flush_if_needed("constant"); self._check_writers()
                     produced_const += 1
                 else:
                     episodes, saved_rewards = self._collect_episode("switch")
                     print(f"[Collector] collecting switch ({produced_switch+1}/{produced_total}/{num_total}) | q_switch={self.switch_writer.queue.qsize()} saved_rewards={np.mean(saved_rewards)} saved_rewards_max={np.max(saved_rewards)} saved_rewards_min={np.min(saved_rewards)}")
                     self._accum_switch.extend(episodes)
-                    self._flush_if_needed("switch")
+                    self._flush_if_needed("switch"); self._check_writers()
                     produced_switch += 1
         finally:
-            # Ensure all pending batches complete before shutdown
-            self._final_flush()
+            # Signal stop first, then flush and join writers
             self._stop_event.set()
+            self._check_writers()
+            self._final_flush()
 
     def __del__(self):
         # signal stop and flush
         try:
             self._stop_event.set()
+            self._check_writers()
             self._final_flush()
         except Exception:
             pass
@@ -620,5 +691,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
