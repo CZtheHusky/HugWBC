@@ -56,13 +56,14 @@ import shutil
 # )
 
 class ReplayBufferWriter:
-    def __init__(self, zarr_path: str, traj_type: str, stop_event: threading.Event, max_queue_size: int = 8):
+    def __init__(self, zarr_path: str, traj_type: str, stop_event: threading.Event, max_queue_size: int = 8, small_chunks: bool = False):
         self.zarr_path = zarr_path
         self.traj_type = traj_type  # "constant" or "switch"
         self.stop_event = stop_event
         self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max_queue_size)
         self.thread = threading.Thread(target=self._run, name=f"ReplayWriter-{traj_type}", daemon=True)
         self._started = False
+        self.small_chunks = small_chunks
 
     def start(self):
         if not self._started:
@@ -111,64 +112,73 @@ class ReplayBufferWriter:
                 if self.stop_event.is_set():
                     break
                 continue
-            try:
-                episodes: List[Dict[str, Any]] = item["episodes"]
-                t0 = time.time()
-                # Build bulk arrays by concatenating along time dimension
-                lengths = np.array([len(ep["data"]["proprio"]) for ep in episodes], dtype=np.int64)
-                total_T = int(lengths.sum())
+            episodes: List[Dict[str, Any]] = item["episodes"]
+            t0 = time.time()
+            # Build bulk arrays by concatenating along time dimension
+            lengths = np.array([len(ep["data"]["proprio"]) for ep in episodes], dtype=np.int64)
+            total_T = int(lengths.sum())
 
-                # Collect and concat keys present
-                # we now split obs into proprio/commands/clock ahead of time
-                data_keys = ["proprio","commands","clock","critic_obs","actions","rewards","dones","root_states"]
+            # Collect and concat keys present
+            # we now split obs into proprio/commands/clock ahead of time
+            data_keys = ["commands","clock","actions","rewards","dones","root_states"]
+            if self.small_chunks:
+                disk_keys = ["proprio", "critic_obs"]
+            else:
+                disk_keys = []
+                data_keys.append("proprio")
+                data_keys.append("critic_obs")
+            
 
-                concat_data: Dict[str, np.ndarray] = {}
-                for key in data_keys:
-                    arrays = []
-                    for ep in episodes:
-                        arr = ep["data"].get(key, None)
-                        if arr is None:
-                            arrays = []
-                            break
-                        if not isinstance(arr, np.ndarray):
-                            arr = np.asarray(arr)
-                        arrays.append(arr)
-                    if arrays:
-                        concat_data[key] = np.concatenate(arrays, axis=0)
+            concat_data: Dict[str, np.ndarray] = {}
+            for key in data_keys:
+                arrays = []
+                for ep in episodes:
+                    arr = ep["data"].get(key, None)
+                    if arr is None:
+                        arrays = []
+                        break
+                    if not isinstance(arr, np.ndarray):
+                        arr = np.asarray(arr)
+                    arrays.append(arr)
+                if arrays:
+                    concat_data[key] = np.concatenate(arrays, axis=0)
 
-                # Append all step data in one call
-                if concat_data:
-                    buffer.add_chunked_data(concat_data, target_chunk_bytes=1024 * 1024 * 1024 * 2)
+            # Append all step data in one call
+            if concat_data:
+                buffer.add_chunked_data(concat_data, target_chunk_bytes=1024 * 1024 * 1024 * 2)
+            for ep in episodes:
+                disk_data = {}
+                for key in disk_keys:
+                    disk_data[key] = np.asarray(ep["data"][key])
+                buffer.add_chunked_data(disk_data, target_chunk_bytes=1024 * 1024 * 2)
 
-                # Compute episode_ends based on current steps
-                curr_steps = buffer.n_steps
-                start_steps = curr_steps
-                episode_ends = start_steps + np.cumsum(lengths)
+            # Compute episode_ends based on current steps
+            curr_steps = buffer.n_steps
+            start_steps = curr_steps
+            episode_ends = start_steps + np.cumsum(lengths)
 
-                # Build per-episode meta
-                rewards = np.array([float(ep["meta"].get("reward", 0.0)) for ep in episodes], dtype=np.float32)
-                if self.traj_type == "switch":
-                    cmd_A = np.stack([np.asarray(ep["meta"]["command_A"], dtype=np.float32) for ep in episodes])
-                    cmd_B = np.stack([np.asarray(ep["meta"].get("command_B", np.zeros_like(cmd_A[0])), dtype=np.float32) for ep in episodes])
-                    meta_bulk = {
-                        "episode_ends": episode_ends.astype(np.int64),
-                        "episode_reward": rewards,
-                        "episode_command_A": cmd_A,
-                        "episode_command_B": cmd_B,
-                    }
-                else:
-                    cmd = np.stack([np.asarray(ep["meta"]["command"], dtype=np.float32) for ep in episodes])
-                    meta_bulk = {
-                        "episode_ends": episode_ends.astype(np.int64),
-                        "episode_reward": rewards,
-                        "episode_command": cmd,
-                    }
-                buffer.add_chunked_meta(meta_bulk, target_chunk_bytes=1024 * 1024 * 1024 * 2)
+            # Build per-episode meta
+            rewards = np.array([float(ep["meta"].get("reward", 0.0)) for ep in episodes], dtype=np.float32)
+            if self.traj_type == "switch":
+                cmd_A = np.stack([np.asarray(ep["meta"]["command_A"], dtype=np.float32) for ep in episodes])
+                cmd_B = np.stack([np.asarray(ep["meta"].get("command_B", np.zeros_like(cmd_A[0])), dtype=np.float32) for ep in episodes])
+                meta_bulk = {
+                    "episode_ends": episode_ends.astype(np.int64),
+                    "episode_reward": rewards,
+                    "episode_command_A": cmd_A,
+                    "episode_command_B": cmd_B,
+                }
+            else:
+                cmd = np.stack([np.asarray(ep["meta"]["command"], dtype=np.float32) for ep in episodes])
+                meta_bulk = {
+                    "episode_ends": episode_ends.astype(np.int64),
+                    "episode_reward": rewards,
+                    "episode_command": cmd,
+                }
+            buffer.add_chunked_meta(meta_bulk, target_chunk_bytes=1024 * 1024 * 1024 * 2)
 
-                dt = time.time() - t0
-                print(f"[ReplayBufferWriter-{self.traj_type}] wrote {len(episodes)} episodes (T={total_T}) in {dt:.3f}s (total_eps={buffer.n_episodes})")
-            finally:
-                self.queue.task_done()
+            dt = time.time() - t0
+            print(f"[ReplayBufferWriter-{self.traj_type}] wrote {len(episodes)} episodes (T={total_T}) in {dt:.3f}s (total_eps={buffer.n_episodes})")
         # flush done
 
 
@@ -198,6 +208,7 @@ def _parse_merged_args():
         {"name": "--switch_prob", "type": float, "default": 0.8},
         {"name": "--flush_episodes", "type": int, "default": 1000},
         {"name": "--episode_length_s", "type": float, "default": 10.0},
+        {"name": "--small_chunks", "action": "store_true", "default": False},
     ]
     args = gymutil.parse_arguments(
         description="Trajectory Data Collector",
@@ -223,6 +234,7 @@ class TrajectoryDataCollector:
         self.headless = bool(getattr(self.args, "headless", True))
         self.load_checkpoint = getattr(self.args, "load_checkpoint", None)
         self.output_root = getattr(self.args, "output_root", "collected")
+        self.output_root = os.path.join(self.output_root, "dataset")
         self.flush_episodes = int(getattr(self.args, "flush_episodes", 1000))
         self.max_learning_iter = max_learning_iter
 
@@ -272,20 +284,23 @@ class TrajectoryDataCollector:
 
         # queue size small to apply backpressure
         if args.const_prob > 0:
-            self.constant_writer = ReplayBufferWriter(self.constant_rb_path, "constant", self._stop_event, max_queue_size=8)
+            self.constant_writer = ReplayBufferWriter(self.constant_rb_path, "constant", self._stop_event, max_queue_size=8, small_chunks=args.small_chunks)
             self.constant_writer.start()
+        else:
+            self.constant_writer = None
         if args.switch_prob > 0:
-            self.switch_writer = ReplayBufferWriter(self.switch_rb_path, "switch", self._stop_event, max_queue_size=8)
+            self.switch_writer = ReplayBufferWriter(self.switch_rb_path, "switch", self._stop_event, max_queue_size=8, small_chunks=args.small_chunks)
             self.switch_writer.start()
-
+        else:
+            self.switch_writer = None
         # reset once to init buffers
         _, _ = self.env.reset()
 
     def _wait_for_queue(self, which: str) -> None:
         # backpressure: block when queue is too full (>= num_envs)
         q = self.constant_writer.queue if which == "constant" else self.switch_writer.queue
-        while q.qsize() >= self.num_envs:
-            time.sleep(0.01)
+        while q.qsize() >= 8:
+            time.sleep(0.1)
 
     def _get_actions(self) -> torch.Tensor:
         with torch.inference_mode():
@@ -554,8 +569,10 @@ class TrajectoryDataCollector:
             self.switch_writer.put_batch({"episodes": self._accum_switch})
             self._accum_switch = []
         # wait writers
-        self.constant_writer.join()
-        self.switch_writer.join()
+        if self.constant_writer is not None:
+            self.constant_writer.join()
+        if self.switch_writer is not None:
+            self.switch_writer.join()
 
     def collect(self, num_total: int, const_prob: float, switch_prob: float) -> None:
         max_learning_iter = self.max_learning_iter
@@ -571,13 +588,13 @@ class TrajectoryDataCollector:
                 next_type = "constant" if np.random.rand() < const_prob else "switch"
                 if next_type == "constant":
                     episodes, saved_rewards = self._collect_episode("constant")
-                    print(f"[Collector] collecting constant ({produced_const+1}/{produced_total}) | q_const={self.constant_writer.queue.qsize()} q_switch={self.switch_writer.queue.qsize()} saved_rewards={np.mean(saved_rewards)} saved_rewards_max={np.max(saved_rewards)} saved_rewards_min={np.min(saved_rewards)}")
+                    print(f"[Collector] collecting constant ({produced_const+1}/{produced_total}/{num_total}) | q_const={self.constant_writer.queue.qsize()} saved_rewards={np.mean(saved_rewards)} saved_rewards_max={np.max(saved_rewards)} saved_rewards_min={np.min(saved_rewards)}")
                     self._accum_constant.extend(episodes)
                     self._flush_if_needed("constant")
                     produced_const += 1
                 else:
                     episodes, saved_rewards = self._collect_episode("switch")
-                    print(f"[Collector] collecting switch ({produced_switch+1}/{produced_total}) | q_const={self.constant_writer.queue.qsize()} q_switch={self.switch_writer.queue.qsize()} saved_rewards={np.mean(saved_rewards)} saved_rewards_max={np.max(saved_rewards)} saved_rewards_min={np.min(saved_rewards)}")
+                    print(f"[Collector] collecting switch ({produced_switch+1}/{produced_total}/{num_total}) | q_switch={self.switch_writer.queue.qsize()} saved_rewards={np.mean(saved_rewards)} saved_rewards_max={np.max(saved_rewards)} saved_rewards_min={np.min(saved_rewards)}")
                     self._accum_switch.extend(episodes)
                     self._flush_if_needed("switch")
                     produced_switch += 1

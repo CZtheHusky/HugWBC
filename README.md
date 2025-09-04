@@ -81,6 +81,12 @@ CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 4000 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_constant 5 --num_switch 20
+
+CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 1000 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_total 4000 --const_prob 1 --switch_prob 0 --episode_length_s 2.5 --output_root small_chunk_large --small_chunks
+
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
