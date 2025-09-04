@@ -262,9 +262,9 @@ class TrajectoryDataCollector:
     ) -> None:
         self.args = args if args is not None else _parse_merged_args()
         self.task_name = getattr(self.args, "task", "h1int")
-        self.num_envs = getattr(self.args, "num_envs", 4) or 4
+        self.num_envs = getattr(self.args, "num_envs", 4)
         self.headless = bool(getattr(self.args, "headless", True))
-        self.load_checkpoint = getattr(self.args, "load_checkpoint", None)
+        self.load_checkpoint = getattr(self.args, "load_checkpoint")
         self.output_root = getattr(self.args, "output_root", "collected")
         self.output_root = os.path.join("dataset", self.output_root)
         self.flush_episodes = int(getattr(self.args, "flush_episodes", 1000))
@@ -313,7 +313,6 @@ class TrajectoryDataCollector:
         self.device = self.env.device
 
         # optional policy for actions
-        self.policy = None
         if self.load_checkpoint:
             try:
                 self.train_cfg.runner.resume = True
@@ -323,7 +322,6 @@ class TrajectoryDataCollector:
             except Exception as e:
                 print(f"Error loading checkpoint: {e}")
                 raise e
-                self.policy = None
 
         # queue size small to apply backpressure
         if args.const_prob > 0:
@@ -479,15 +477,6 @@ class TrajectoryDataCollector:
             # For constant trajectories, cmd_B is not used
             cmd_B = None
 
-        # # Initialize buffers
-        # proprio_buffers = [[] for _ in range(self.env.num_envs)]
-        # privileged_buffers = [[] for _ in range(self.env.num_envs)]
-        # terrain_buffers = [[] for _ in range(self.env.num_envs)]
-        # act_buffers = [[] for _ in range(self.env.num_envs)]
-        # rew_buffers = [[] for _ in range(self.env.num_envs)]
-        # done_buffers = [[] for _ in range(self.env.num_envs)]
-        # cmd_buffers = [[] for _ in range(self.env.num_envs)]
-        # clock_buffers = [[] for _ in range(self.env.num_envs)]
         last_obs_buffers = []
         last_critic_obs_buffers = []
         action_buffers = []
@@ -525,8 +514,8 @@ class TrajectoryDataCollector:
             last_obs_buffers.append(last_obs[:, -1].detach().cpu().numpy())
             last_critic_obs_buffers.append(last_critic_obs[:, last_obs.shape[-1]:].detach().cpu().numpy())
             action_buffers.append(actions.detach().cpu().numpy())
-            reward_buffers.append(float(step_rewards.cpu().numpy()))
-            done_buffers.append(bool(dones.cpu().numpy()))
+            reward_buffers.append(step_rewards.cpu().numpy())
+            done_buffers.append(dones.cpu().numpy())
             
             # # Record data for active environments
             # for eid in range(self.env.num_envs):
@@ -552,7 +541,7 @@ class TrajectoryDataCollector:
             env_valid_steps[active_mask] += 1
             if dones.any():
                 active_mask[dones > 0] = False
-            print(env_valid_steps.cpu().numpy())
+            # print(env_valid_steps.cpu().numpy())
             # break when all envs finished early
             if (~active_mask).all():
                 break
