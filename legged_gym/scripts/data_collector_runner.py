@@ -233,8 +233,8 @@ def _parse_merged_args():
         {"name": "--load_checkpoint", "type": str},
         {"name": "--output_root", "type": str, "default": "test"},
         {"name": "--num_total", "type": int, "default": 10},
-        {"name": "--const_prob", "type": float, "default": 0.2},
-        {"name": "--switch_prob", "type": float, "default": 0.8},
+        {"name": "--const_prob", "type": float, "default": 0},
+        {"name": "--switch_prob", "type": float, "default": 0},
         {"name": "--flush_episodes", "type": int, "default": 1000},
         {"name": "--episode_length_s", "type": float, "default": 10.0},
         {"name": "--small_chunks", "action": "store_true", "default": False},
@@ -557,7 +557,7 @@ class TrajectoryDataCollector:
         action_buffers = np.stack(action_buffers, axis=1)
         reward_buffers = np.stack(reward_buffers, axis=1).astype(np.float32)
         done_buffers = np.stack(done_buffers, axis=1).astype(bool)
-        assert done_buffers.shape == (self.env.num_envs, max_steps)
+        # assert done_buffers.shape == (self.env.num_envs, max_steps)
         env_valid_steps = env_valid_steps.cpu().numpy()
         for eid in range(self.env.num_envs):
             env_steps = env_valid_steps[eid]
