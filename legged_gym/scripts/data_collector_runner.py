@@ -127,7 +127,7 @@ class ReplayBufferWriter:
                 episodes: List[Dict[str, Any]] = item["episodes"]
                 t0 = time.time()
                 # Build bulk arrays by concatenating along time dimension
-                lengths = np.array([len(ep["data"]["proprio"]) for ep in episodes], dtype=np.int64)
+                lengths = np.array([len(ep["data"]["proprio"]) for ep in episodes]).astype(np.int64)
                 total_T = int(lengths.sum())
 
                 # Collect and concat keys present
@@ -170,11 +170,11 @@ class ReplayBufferWriter:
                 start_steps = curr_steps
                 episode_ends = start_steps + np.cumsum(lengths)
 
-                rewards = np.array([ep["meta"]["episode_reward"] for ep in episodes], dtype=np.float32)
-                step_rewards = np.array([ep["meta"]["episode_step_reward"] for ep in episodes], dtype=np.float32)
+                rewards = np.array([ep["meta"]["episode_reward"] for ep in episodes]).astype(np.float32)
+                step_rewards = np.array([ep["meta"]["episode_step_reward"] for ep in episodes]).astype(np.float32)
                 if self.traj_type == "switch":
-                    cmd_A = np.stack([np.asarray(ep["meta"]["episode_command_A"], dtype=np.float32) for ep in episodes])
-                    cmd_B = np.stack([np.asarray(ep["meta"]["episode_command_B"], dtype=np.float32) for ep in episodes])
+                    cmd_A = np.stack([np.asarray(ep["meta"]["episode_command_A"]).astype(np.float32) for ep in episodes])
+                    cmd_B = np.stack([np.asarray(ep["meta"]["episode_command_B"]).astype(np.float32) for ep in episodes])
                     meta_bulk = {
                         "episode_ends": episode_ends.astype(np.int64),
                         "episode_reward": rewards,
@@ -183,7 +183,7 @@ class ReplayBufferWriter:
                         "episode_command_B": cmd_B,
                     }
                 else:
-                    cmd = np.stack([np.asarray(ep["meta"]["episode_command"], dtype=np.float32) for ep in episodes])
+                    cmd = np.stack([np.asarray(ep["meta"]["episode_command"]).astype(np.float32) for ep in episodes])
                     meta_bulk = {
                         "episode_ends": episode_ends.astype(np.int64),
                         "episode_reward": rewards,
@@ -277,6 +277,9 @@ class TrajectoryDataCollector:
         self.terrain_dim = 221
         self.total_obs_dim = self.proprio_dim + self.action_dim + self.cmd_dim + self.clock_dim
         self.total_privileged_dim = self.privileged_dim + self.terrain_dim + self.total_obs_dim
+        print("=" * 100)
+        print(self.total_obs_dim, self.total_privileged_dim)
+        print("=" * 100)
 
 
 
@@ -472,7 +475,7 @@ class TrajectoryDataCollector:
             self._resample_commands(env_ids)
             cmd_B = self.env.commands.detach()
             # Reset to first command set
-            self.env.commands = cmd_A.detach()
+            self.env.commands.copy_(cmd_A)
         else:
             # For constant trajectories, cmd_B is not used
             cmd_B = None
@@ -509,7 +512,7 @@ class TrajectoryDataCollector:
             # Switch commands halfway through for switch trajectories
             if trajectory_type == "switch" and t == max_steps // 2:
                 current_commands = cmd_B.detach() 
-            self.env.commands = current_commands
+            self.env.commands.copy_(current_commands)
 
             last_obs_buffers.append(last_obs[:, -1].detach().cpu().numpy())
             last_critic_obs_buffers.append(last_critic_obs[:, last_obs.shape[-1]:].detach().cpu().numpy())
@@ -552,8 +555,8 @@ class TrajectoryDataCollector:
         last_obs_buffers = np.stack(last_obs_buffers, axis=1)
         last_critic_obs_buffers = np.stack(last_critic_obs_buffers, axis=1)
         action_buffers = np.stack(action_buffers, axis=1)
-        reward_buffers = np.stack(reward_buffers, axis=1, dtype=np.float32)
-        done_buffers = np.stack(done_buffers, axis=1, dtype=bool)
+        reward_buffers = np.stack(reward_buffers, axis=1).astype(np.float32)
+        done_buffers = np.stack(done_buffers, axis=1).astype(bool)
         assert done_buffers.shape == (self.env.num_envs, max_steps)
         env_valid_steps = env_valid_steps.cpu().numpy()
         for eid in range(self.env.num_envs):
@@ -581,8 +584,8 @@ class TrajectoryDataCollector:
                 "privileged": np.array(traj_privileged),
                 "terrain": np.array(traj_terrain),
                 "actions": np.array(traj_action),
-                "rewards": np.array(traj_reward, dtype=np.float32),
-                "dones": np.array(traj_done, dtype=bool),
+                "rewards": np.array(traj_reward).astype(np.float32),
+                "dones": np.array(traj_done).astype(bool),
             }
 
             meta_entry: Dict[str, Any] = {
