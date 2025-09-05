@@ -4,9 +4,9 @@ import os
 def get_commands(idx, ckpt_name):
     cuda_idx = idx % 2
     return f"CUDA_VISIBLE_DEVICES={cuda_idx} python ./legged_gym/scripts/data_collector_runner.py \
-  --task h1int --num_envs 1000 --headless \
+  --task h1int --num_envs 100 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/{ckpt_name} \
-  --num_total 200 --switch_prob 1 --episode_length_s 4 --output_root {ckpt_name.split('.')[0]}"
+  --num_total 2000 --switch_prob 1 --episode_length_s 4 --output_root {ckpt_name.split('.')[0]} --overwrite"
 
 ckpt_paths = "logs/h1_interrupt/Aug21_13-31-13_"
 ckpts = os.listdir(ckpt_paths)
