@@ -172,6 +172,7 @@ class ReplayBufferWriter:
 
                 rewards = np.array([ep["meta"]["episode_reward"] for ep in episodes]).astype(np.float32)
                 step_rewards = np.array([ep["meta"]["episode_step_reward"] for ep in episodes]).astype(np.float32)
+                ep_start_obs = np.array([ep["meta"]["ep_start_obs"] for ep in episodes]).astype(np.float32)
                 if self.traj_type == "switch":
                     cmd_A = np.stack([np.asarray(ep["meta"]["episode_command_A"]).astype(np.float32) for ep in episodes])
                     cmd_B = np.stack([np.asarray(ep["meta"]["episode_command_B"]).astype(np.float32) for ep in episodes])
@@ -179,6 +180,7 @@ class ReplayBufferWriter:
                         "episode_ends": episode_ends.astype(np.int64),
                         "episode_reward": rewards,
                         "episode_step_reward": step_rewards,
+                        "ep_start_obs": ep_start_obs,
                         "episode_command_A": cmd_A,
                         "episode_command_B": cmd_B,
                     }
@@ -188,6 +190,7 @@ class ReplayBufferWriter:
                         "episode_ends": episode_ends.astype(np.int64),
                         "episode_reward": rewards,
                         "episode_step_reward": step_rewards,
+                        "ep_start_obs": ep_start_obs,
                         "episode_command": cmd,
                     }
                 buffer.add_chunked_meta(meta_bulk, target_chunk_bytes=64 * 1024 * 1024)
@@ -497,6 +500,7 @@ class TrajectoryDataCollector:
         )).to(self.device)
         max_steps = int(self.env_cfg.env.episode_length_s / self.env.dt)
         last_obs, last_critic_obs, _, _, _ = self.env.step(torch.zeros(self.env.num_envs, self.env.num_actions, dtype=torch.float, device=self.env.device))
+        ep_start_obs = last_obs[:, :-1].detach().cpu().numpy()
         assert len(last_critic_obs.shape) == 2
         assert len(last_obs.shape) == 3
         assert last_obs.shape[-1] == self.total_obs_dim
@@ -591,6 +595,7 @@ class TrajectoryDataCollector:
             meta_entry: Dict[str, Any] = {
                 "episode_reward": traj_rew,
                 "episode_step_reward": traj_step_reward,
+                "ep_start_obs": ep_start_obs[eid],
             }
             if trajectory_type == "switch":
                 meta_entry["episode_command_A"] = cmd_A[eid].cpu().numpy()

@@ -17,7 +17,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 
 
-class MyDataset(Dataset):
+class MyDataset_legacy(Dataset):
     def __init__(self, rb):
         self.data_dict = {}
         for key in rb.data.keys():
@@ -35,6 +35,46 @@ class MyDataset(Dataset):
         critic_obs = self.data_dict['critic_obs'][idx]
         actions = self.data_dict['actions'][idx]
         return obs, critic_obs, actions
+
+class MyDataset(Dataset):
+    def __init__(self, rb, horizon=5):
+        self.data_dict = {}
+        for key in rb.data.keys():
+            self.data_dict[key] = rb.data[key][:]
+        self.horizon = horizon
+        episode_ends = rb.meta['episode_ends'][:]
+        # map the index to the episode id
+        episode_id = np.repeat(np.arange(len(episode_ends)), np.diff([0, *episode_ends]))
+        self.episode_id = episode_id
+        self.episode_ends = episode_ends
+        self.ep_start_obs = rb.meta['ep_start_obs'][:]
+    
+    def __len__(self):
+        return len(self.data_dict['actions'])
+    
+    def __getitem__(self, idx):
+        ep_id = self.episode_id[idx]
+        ep_start = 0 if ep_id == 0 else self.episode_ends[ep_id - 1]
+        horizon_start = max(ep_start, idx - self.horizon + 1)
+        horizon_end = idx + 1
+        cmd = self.data_dict['commands'][horizon_start:horizon_end]
+        clock = self.data_dict['clock'][horizon_start:horizon_end]
+        proprio = self.data_dict['proprio'][horizon_start:horizon_end]
+        valid_len = cmd.shape[0]
+        history_action = np.zeros((valid_len, self.data_dict['actions'].shape[-1]))
+        if valid_len > 1:
+            his_a_start = max(ep_start, idx - self.horizon)
+            his_a_end = idx
+            history_len = his_a_end - his_a_start
+            history_action[-history_len:] = self.data_dict['actions'][his_a_start:his_a_end]
+        obs = np.concatenate([proprio, history_action, cmd, clock], axis=-1)
+        if valid_len < self.horizon:
+            obs = np.concatenate([self.ep_start_obs[ep_id, -(self.horizon - valid_len):], obs], axis=0)
+        terrain = self.data_dict['terrain'][idx]
+        privileged = self.data_dict['privileged'][idx]
+        critic_obs = np.concatenate([obs[-1], privileged, terrain], axis=-1)
+        actions = self.data_dict['actions'][idx]
+        return obs.astype(np.float32), critic_obs.astype(np.float32), actions.astype(np.float32)
 
 def play(args):
     # 获取环境配置和训练配置
@@ -116,14 +156,17 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
     # rb_path = "/root/workspace/HugWBC/example_trajectories/crab_left_walk.zarr"
     # rb_path = "/root/workspace/HugWBC/collected_trajectories_v2/switch.zarr"
-    rb_path = "/root/workspace/HugWBC/collected_single_short/constant.zarr"
+    # rb_path = "/root/workspace/HugWBC/dataset/example_trajectories/crab_right_walk.zarr"
+    # rb_path = "/root/workspace/HugWBC/dataset/model_40000/switch.zarr"
+    rb_path = "dataset/test/switch.zarr"
     rb = ReplayBuffer.create_from_path(rb_path)
     dataset = MyDataset(rb)
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=16)
-    sample_mse_errors = []
     gt_action_log_probs = []
     privileged_recon_losses = []
     mean_mse_errors = []
+    min_mse_errors = []
+    max_mse_errors = []
     policy.eval()
     for i, (obs, critic_obs, actions) in enumerate(dataloader):
         with torch.inference_mode():
@@ -131,19 +174,24 @@ def play(args):
             critic_obs = torch.as_tensor(critic_obs).to(env.device)
             actions = torch.as_tensor(actions).to(env.device)
             action_sample = policy.act(obs, privileged_obs=critic_obs, sync_update=True)
-            privileged_recon_loss = policy.actor.privileged_recon_loss
-            privileged_recon_losses.append(privileged_recon_loss.item())
-            action_mse = ((action_sample - actions) ** 2).mean()
+            privileged_recon_loss = policy.actor.privileged_recon_loss.item()
+            # action_mse = ((action_sample - actions) ** 2).mean()
+            privileged_recon_losses.append(privileged_recon_loss)
             gt_action_log_prob = policy.get_actions_log_prob(actions).mean()
             dist = policy.distribution
-            mean_action_mse = ((dist.mean - actions) ** 2).mean()
-            sample_mse_errors.append(action_mse.item())
-            mean_mse_errors.append(mean_action_mse.item())
+            action_mse = ((dist.mean - actions) ** 2)
+            min_mse = action_mse.min()
+            max_mse = action_mse.max()
+            mean_mse = action_mse.mean()
+            # sample_mse_errors.append(action_mse.item())
+            mean_mse_errors.append(mean_mse.item())
+            min_mse_errors.append(min_mse.item())
+            max_mse_errors.append(max_mse.item())
             gt_action_log_probs.append(gt_action_log_prob.item())
         if i % 100 == 0:
-            print(f"Iteration {i}, sample_mse_errors: {np.mean(sample_mse_errors)}, mean_mse_errors: {np.mean(mean_mse_errors)}, gt_action_log_probs: {np.mean(gt_action_log_probs)}")
+            print(f"Iteration {i}, mean_mse_errors: {np.mean(mean_mse_errors)}, min_mse_errors: {np.mean(min_mse_errors)}, max_mse_errors: {np.mean(max_mse_errors)}, gt_action_log_probs: {np.mean(gt_action_log_probs)} , privileged_recon_loss: {np.mean(privileged_recon_losses)}")
 
-    print(f"sample_mse_errors: {np.mean(sample_mse_errors)}, mean_mse_errors: {np.mean(mean_mse_errors)}, gt_action_log_probs: {np.mean(gt_action_log_probs)}")
+    print(f"mean_mse_errors: {np.mean(mean_mse_errors)}, min_mse_errors: {np.mean(min_mse_errors)}, max_mse_errors: {np.mean(max_mse_errors)}, gt_action_log_probs: {np.mean(gt_action_log_probs)}, privileged_recon_loss: {np.mean(privileged_recon_losses)}")
 
 # python -m debugpy --listen 5678 --wait-for-client /root/workspace/HugWBC/legged_gym/scripts/play_ds_check.py --task=h1int --headless --load_run=Aug21_13-31-13_ --checkpoint=40000
     
