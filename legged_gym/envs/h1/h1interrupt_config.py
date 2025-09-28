@@ -64,7 +64,7 @@ class H1InterruptCfg( H1Cfg ):
     
     class disturb:
         max_curriculum = 1.0
-        use_disturb = True 
+        use_disturb = False  # 关闭interrupt功能 
         disturb_dim = DISTURB_DIM  
         disturb_scale = 2  
         noise_scale = [

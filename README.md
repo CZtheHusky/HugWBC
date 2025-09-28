@@ -87,6 +87,36 @@ CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_total 4000 --const_prob 1 --switch_prob 0 --episode_length_s 2.5 --output_root small_chunk_large --small_chunks
 
+CUDA_VISIBLE_DEVICES=3 python ./legged_gym/scripts/denoise_data_collector_runner.py \
+  --task h1int --num_envs 1000 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_total 1000 --const_prob 1 --switch_prob 0 --episode_length_s 2 --output_root bootstrap_1 --no_disturb --overwrite --seed 987
+
+CUDA_VISIBLE_DEVICES=2 python ./legged_gym/scripts/denoise_data_collector_runner.py \
+  --task h1int --num_envs 1000 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_total 1000 --const_prob 1 --switch_prob 0 --episode_length_s 2 --output_root bootstrap_2 --no_disturb --overwrite --seed 123
+
+CUDA_VISIBLE_DEVICES=3 python ./legged_gym/scripts/denoise_data_collector_runner.py \
+  --task h1int --num_envs 1000 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_total 1000 --const_prob 1 --switch_prob 0 --episode_length_s 2 --output_root bootstrap_3 --no_disturb --overwrite --seed 1234
+
+CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 100 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_total 1 --const_prob 1 --switch_prob 0 --episode_length_s 10 --output_root test
+
+CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 100 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_total 1 --const_prob 1 --switch_prob 0 --episode_length_s 2 --output_root latent_test --save_latent --overwrite
+
+CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
+  --task h1int --num_envs 100 --headless \
+  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --num_total 1 --const_prob 0 --switch_prob 1 --episode_length_s 3 --output_root latent_test --save_latent --overwrite
+
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \

@@ -70,6 +70,7 @@ class BaseAdaptModel(nn.Module):
         self.privileged_recon_loss = 0
         self.privileged_recon_dim = privileged_recon_dim
         self.z = 0
+        self.mem = None
 
         self.state_estimator = nn.Sequential(*MLP(latent_dim, self.privileged_recon_dim, [64, 32], activation))        
         self.low_level_net = nn.Sequential(*MLP(proprioception_dim + latent_dim + self.cmd_dim + privileged_recon_dim, act_dim,
@@ -80,6 +81,7 @@ class BaseAdaptModel(nn.Module):
         cmd = x[..., -1, self.proprioception_dim:self.proprioception_dim+self.cmd_dim]
 
         mem = self.memory_encoder(pro_obs_seq, **kwargs)
+        self.mem = mem
         privileged_pred_now = self.state_estimator(mem)
         jp_out = self.low_level_net(torch.cat((mem, privileged_pred_now, x[..., -1, :self.proprioception_dim], cmd), dim=-1))
 

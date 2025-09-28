@@ -61,15 +61,32 @@ class MyDataset(Dataset):
         clock = self.data_dict['clock'][horizon_start:horizon_end]
         proprio = self.data_dict['proprio'][horizon_start:horizon_end]
         valid_len = cmd.shape[0]
-        history_action = np.zeros((valid_len, self.data_dict['actions'].shape[-1]))
+
+        # 预分配 + 原地写，避免 concatenate
+        act_dim = self.data_dict['actions'].shape[-1]
+        obs = np.empty((self.horizon, proprio.shape[-1] + act_dim + cmd.shape[-1] + clock.shape[-1]), dtype=proprio.dtype)
+        # 前段可能需要 pad ep_start_obs
+        pad = self.horizon - valid_len
+        obs[pad:pad+valid_len, :proprio.shape[-1]] = proprio
+        obs[:, proprio.shape[-1]:proprio.shape[-1] + act_dim] = 0
         if valid_len > 1:
             his_a_start = max(ep_start, idx - self.horizon)
             his_a_end = idx
-            history_len = his_a_end - his_a_start
-            history_action[-history_len:] = self.data_dict['actions'][his_a_start:his_a_end]
-        obs = np.concatenate([proprio, history_action, cmd, clock], axis=-1)
-        if valid_len < self.horizon:
-            obs = np.concatenate([self.ep_start_obs[ep_id, -(self.horizon - valid_len):], obs], axis=0)
+            history = self.data_dict['actions'][his_a_start:his_a_end]
+            obs[-history.shape[0]:, proprio.shape[-1]:proprio.shape[-1] + act_dim] = history
+        obs[pad:pad+valid_len, -clock.shape[-1] - cmd.shape[-1]:-clock.shape[-1]] = cmd
+        obs[pad:pad+valid_len, -clock.shape[-1]:] = clock
+        if pad > 0:
+            obs[:pad] = self.ep_start_obs[ep_id, -pad:, :obs.shape[-1]]
+        # history_action = np.zeros((valid_len, self.data_dict['actions'].shape[-1]))
+        # if valid_len > 1:
+        #     his_a_start = max(ep_start, idx - self.horizon)
+        #     his_a_end = idx
+        #     history_len = his_a_end - his_a_start
+        #     history_action[-history_len:] = self.data_dict['actions'][his_a_start:his_a_end]
+        # obs = np.concatenate([proprio, history_action, cmd, clock], axis=-1)
+        # if valid_len < self.horizon:
+        #     obs = np.concatenate([self.ep_start_obs[ep_id, -(self.horizon - valid_len):], obs], axis=0)
         terrain = self.data_dict['terrain'][idx]
         privileged = self.data_dict['privileged'][idx]
         critic_obs = np.concatenate([obs[-1], privileged, terrain], axis=-1)
@@ -158,7 +175,10 @@ def play(args):
     # rb_path = "/root/workspace/HugWBC/collected_trajectories_v2/switch.zarr"
     # rb_path = "/root/workspace/HugWBC/dataset/example_trajectories/crab_right_walk.zarr"
     # rb_path = "/root/workspace/HugWBC/dataset/model_40000/switch.zarr"
-    rb_path = "dataset/test/switch.zarr"
+    # rb_path = "dataset/test/switch.zarr"
+    # rb_path = "dataset/collected_single_short/constant.zarr"
+    # rb_path = "/root/workspace/HugWBC/dataset/example_trajectories/slow_forward_walk.zarr"
+    rb_path = "/root/workspace/HugWBC/dataset/test/constant.zarr"
     rb = ReplayBuffer.create_from_path(rb_path)
     dataset = MyDataset(rb)
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=16)

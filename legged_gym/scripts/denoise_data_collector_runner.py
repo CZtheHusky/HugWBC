@@ -1,3 +1,4 @@
+from curses import curs_set
 import os
 import sys
 import json
@@ -337,9 +338,13 @@ class TrajectoryDataCollector:
                 self.train_cfg.runner.resume_path = self.load_checkpoint
                 ppo_runner, _ = task_registry.make_alg_runner(env=self.env, name=self.task_name, args=self.args, train_cfg=self.train_cfg, log_root=None)
                 self.policy = ppo_runner.get_inference_policy(device=self.device)
+                self.train_cfg.runner.resume_path = "/root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_0.pt"
+                random_runner, _ = task_registry.make_alg_runner(env=self.env, name=self.task_name, args=self.args, train_cfg=self.train_cfg, log_root=None)
+                self.random_policy = random_runner.get_inference_policy(device=self.device)
             except Exception as e:
                 print(f"Error loading checkpoint: {e}")
                 raise e
+    
 
         # queue size small to apply backpressure
         if args.const_prob > 0:
@@ -523,7 +528,10 @@ class TrajectoryDataCollector:
         current_commands = cmd_A.detach()
         while t < max_steps and active_mask.any():
             with torch.inference_mode():
-                actions, _ = self.policy.act_inference(last_obs, privileged_obs=last_critic_obs)
+                if np.random.rand() < self.random_prob:
+                    actions, _ = self.random_policy.act_inference(last_obs, privileged_obs=last_critic_obs)
+                else:   
+                    actions, _ = self.policy.act_inference(last_obs, privileged_obs=last_critic_obs)
                 if self.save_latent:
                     latent = self.policy.actor.mem.detach().cpu().numpy()
 
@@ -613,7 +621,7 @@ class TrajectoryDataCollector:
             episodes.append({"data": data, "meta": meta_entry})
 
         # allow curriculum tick
-        self.env.training_curriculum(num_steps=self.curriculum_factor)
+        # self.env.training_curriculum(num_steps=self.curriculum_factor)
         return episodes, saved_rewards
 
     def _flush_if_needed(self, which: str) -> None:
@@ -646,10 +654,19 @@ class TrajectoryDataCollector:
         if self.switch_writer is not None:
             self.switch_writer.join()
 
+
+    def get_random_prob(self, cur_step, num_total):
+        if cur_step / num_total >= 0.9:
+            self.random_prob = 0
+        else:
+            self.random_prob = max(0, 1 - cur_step / (num_total * 0.9))
+
+
+
     def collect(self, num_total: int, const_prob: float, switch_prob: float) -> None:
         max_learning_iter = self.max_learning_iter
         total_eps_num = num_total * self.num_envs
-        self.curriculum_factor = max_learning_iter / total_eps_num
+        # self.curriculum_factor = max_learning_iter / total_eps_num
         assert abs(const_prob + switch_prob - 1.0) < 1e-6
         try:
             produced_total = 0
@@ -657,6 +674,7 @@ class TrajectoryDataCollector:
             produced_switch = 0
             while produced_total < num_total:
                 self._check_writers()
+                self.get_random_prob(produced_total, num_total)
                 produced_total += 1
                 next_type = "constant" if np.random.rand() < const_prob else "switch"
                 if next_type == "constant":

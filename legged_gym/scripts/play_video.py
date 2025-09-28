@@ -102,7 +102,7 @@ def play(args):
 
     # ==================== 相机传感器与视频写出器 ====================
     VIDEO_PATH = "rgb.mp4"
-    W, H, FPS = 1280, 720, 30
+    W, H, FPS = 720, 720, 30
     frame_skip = max(1, int(round(1.0 / (FPS * env.dt))))  # 模拟 -> 视频帧率下采样
 
     cam_props = gymapi.CameraProperties()
