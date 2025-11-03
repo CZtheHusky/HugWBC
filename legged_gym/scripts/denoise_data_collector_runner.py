@@ -338,7 +338,7 @@ class TrajectoryDataCollector:
                 self.train_cfg.runner.resume_path = self.load_checkpoint
                 ppo_runner, _ = task_registry.make_alg_runner(env=self.env, name=self.task_name, args=self.args, train_cfg=self.train_cfg, log_root=None)
                 self.policy = ppo_runner.get_inference_policy(device=self.device)
-                self.train_cfg.runner.resume_path = "/root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_0.pt"
+                self.train_cfg.runner.resume_path = "/cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_0.pt"
                 random_runner, _ = task_registry.make_alg_runner(env=self.env, name=self.task_name, args=self.args, train_cfg=self.train_cfg, log_root=None)
                 self.random_policy = random_runner.get_inference_policy(device=self.device)
             except Exception as e:

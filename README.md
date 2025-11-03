@@ -72,71 +72,71 @@ python legged_gym/scripts/play_video.py --task=h1int  --load_run=Aug21_13-31-13_
 python legged_gym/scripts/play_example_gen.py --task=h1int  --load_run=Aug21_13-31-13_ --checkpoint=40000
 python legged_gym/scripts/play.py --task=h1int --headless --load_run=Aug21_13-31-13_ --checkpoint=40000
 python /cpfs/user/caozhe/workspace/HugWBC/legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --num_constant 1 --num_switch 1
-python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
-python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 1000 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20 --num_switch 80
-python -m debugpy --listen 5678 --wait-for-client ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 1000 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20 --num_switch 80
-python -m debugpy --listen 5678 --wait-for-client ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
+python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
+python ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 1000 --headless --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20 --num_switch 80
+python -m debugpy --listen 5678 --wait-for-client ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 1000 --headless --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 20 --num_switch 80
+python -m debugpy --listen 5678 --wait-for-client ./legged_gym/scripts/data_collector_runner.py --task h1int --num_envs 2 --headless --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt --num_constant 1 --num_switch 1
 
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 4000 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_constant 5 --num_switch 20
 
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_total 4000 --const_prob 1 --switch_prob 0 --episode_length_s 2.5 --output_root small_chunk_large --small_chunks
 
 CUDA_VISIBLE_DEVICES=3 python ./legged_gym/scripts/denoise_data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_total 1000 --const_prob 1 --switch_prob 0 --episode_length_s 2 --output_root bootstrap_1 --no_disturb --overwrite --seed 987
 
 CUDA_VISIBLE_DEVICES=2 python ./legged_gym/scripts/denoise_data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_total 1000 --const_prob 1 --switch_prob 0 --episode_length_s 2 --output_root bootstrap_2 --no_disturb --overwrite --seed 123
 
 CUDA_VISIBLE_DEVICES=3 python ./legged_gym/scripts/denoise_data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_total 1000 --const_prob 1 --switch_prob 0 --episode_length_s 2 --output_root bootstrap_3 --no_disturb --overwrite --seed 1234
 
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 100 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_total 1 --const_prob 1 --switch_prob 0 --episode_length_s 10 --output_root test
 
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 100 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_total 1 --const_prob 1 --switch_prob 0 --episode_length_s 2 --output_root latent_test --save_latent --overwrite
 
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 100 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_total 1 --const_prob 0 --switch_prob 1 --episode_length_s 3 --output_root latent_test --save_latent --overwrite
 
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_constant 20 --num_switch 80
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
-    --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+    --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
       --num_constant 20 --num_switch 80
 
 CUDA_VISIBLE_DEVICES=2 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 1000 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --output_root collected_large  \
   --num_constant 200 --num_switch 800
 CUDA_VISIBLE_DEVICES=0 python ./legged_gym/scripts/data_collector_runner.py \
   --task h1int --num_envs 4 --headless \
-  --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
+  --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt \
   --num_constant 1 --num_switch 1
 
-CUDA_VISIBLE_DEVICES=7 python ./legged_gym/scripts/data_collector_runner.py   --task h1int --num_envs 1000 --headless   --load_checkpoint /root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt   --num_total 20 --const_prob 1 --switch_prob 0 --episode_length_s 2.5 --output_root new_ds_test --small_chunks --overwrite
+CUDA_VISIBLE_DEVICES=7 python ./legged_gym/scripts/data_collector_runner.py   --task h1int --num_envs 1000 --headless   --load_checkpoint /cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt   --num_total 20 --const_prob 1 --switch_prob 0 --episode_length_s 2.5 --output_root new_ds_test --small_chunks --overwrite
 ```
 
 ### Sim2Sim & Sim2Real Evaluation

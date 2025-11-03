@@ -67,7 +67,7 @@ class CommandsInfer(nn.Module):
         return self.mlp(proprio)
 
 def play():
-    rb_path = "/root/workspace/HugWBC/dataset/collected_single_short_new/constant.zarr"
+    rb_path = "/cpfs/user/caozhe/workspace/HugWBC/dataset/collected_single_short_new/constant.zarr"
     rb = ReplayBuffer.create_from_path(rb_path)
     dataset = MyDataset(rb)
     device = "cuda:4"

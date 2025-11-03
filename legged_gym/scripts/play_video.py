@@ -20,7 +20,7 @@ import imageio.v2 as imageio
 def play(args):
     # 获取环境配置和训练配置
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
-    train_cfg.runner.resume_path = "/root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt"
+    train_cfg.runner.resume_path = "/cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt"
     
     # ==================== 环境参数覆盖设置 ====================
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)

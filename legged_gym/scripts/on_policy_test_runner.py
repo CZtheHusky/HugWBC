@@ -174,7 +174,7 @@ def _parse_merged_args():
         {"name": "--sim_joystick", "action": "store_true", "default": False, "help": "Sample commands from sim joystick"},
     ]
     collector_parameters = [
-        {"name": "--load_checkpoint", "type": str, "default": "/root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt"},
+        {"name": "--load_checkpoint", "type": str, "default": "/cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt"},
         {"name": "--output_root", "type": str, "default": "on_policy_test"},
         {"name": "--episodes_per_env", "type": int, "default": 2},
         {"name": "--record_video", "action": "store_true", "default": False},

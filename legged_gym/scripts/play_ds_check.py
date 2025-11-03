@@ -171,14 +171,14 @@ def play(args):
     ppo_runner, train_cfg = task_registry.make_alg_runner(
         env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
-    # rb_path = "/root/workspace/HugWBC/example_trajectories/crab_left_walk.zarr"
-    # rb_path = "/root/workspace/HugWBC/collected_trajectories_v2/switch.zarr"
-    # rb_path = "/root/workspace/HugWBC/dataset/example_trajectories/crab_right_walk.zarr"
-    # rb_path = "/root/workspace/HugWBC/dataset/model_40000/switch.zarr"
+    # rb_path = "/cpfs/user/caozhe/workspace/HugWBC/example_trajectories/crab_left_walk.zarr"
+    # rb_path = "/cpfs/user/caozhe/workspace/HugWBC/collected_trajectories_v2/switch.zarr"
+    # rb_path = "/cpfs/user/caozhe/workspace/HugWBC/dataset/example_trajectories/crab_right_walk.zarr"
+    # rb_path = "/cpfs/user/caozhe/workspace/HugWBC/dataset/model_40000/switch.zarr"
     # rb_path = "dataset/test/switch.zarr"
     # rb_path = "dataset/collected_single_short/constant.zarr"
-    # rb_path = "/root/workspace/HugWBC/dataset/example_trajectories/slow_forward_walk.zarr"
-    rb_path = "/root/workspace/HugWBC/dataset/test/constant.zarr"
+    # rb_path = "/cpfs/user/caozhe/workspace/HugWBC/dataset/example_trajectories/slow_forward_walk.zarr"
+    rb_path = "/cpfs/user/caozhe/workspace/HugWBC/dataset/test/constant.zarr"
     rb = ReplayBuffer.create_from_path(rb_path)
     dataset = MyDataset(rb)
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=16)
@@ -213,7 +213,7 @@ def play(args):
 
     print(f"mean_mse_errors: {np.mean(mean_mse_errors)}, min_mse_errors: {np.mean(min_mse_errors)}, max_mse_errors: {np.mean(max_mse_errors)}, gt_action_log_probs: {np.mean(gt_action_log_probs)}, privileged_recon_loss: {np.mean(privileged_recon_losses)}")
 
-# python -m debugpy --listen 5678 --wait-for-client /root/workspace/HugWBC/legged_gym/scripts/play_ds_check.py --task=h1int --headless --load_run=Aug21_13-31-13_ --checkpoint=40000
+# python -m debugpy --listen 5678 --wait-for-client /cpfs/user/caozhe/workspace/HugWBC/legged_gym/scripts/play_ds_check.py --task=h1int --headless --load_run=Aug21_13-31-13_ --checkpoint=40000
     
 CANDATE_ENV_COMMANDS = {
     "default": [0, 0, 0, 2, 0.15, 0.5, 0.2, 0, 0, 0],

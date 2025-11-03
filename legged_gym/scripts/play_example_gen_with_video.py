@@ -82,7 +82,7 @@ class CommandDataCollector:
         
         # 创建环境
         self.env, _ = task_registry.make_env(name=self.task_name, args=args, env_cfg=self.env_cfg)
-        self.train_cfg.runner.resume_path = "/root/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt"
+        self.train_cfg.runner.resume_path = "/cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt"
         # 加载策略
         self.train_cfg.runner.resume = True
         ppo_runner, _ = task_registry.make_alg_runner(

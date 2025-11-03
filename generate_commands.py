@@ -20,7 +20,7 @@ def build_argparser():
                    help="Number of parallel slots (processes) to run concurrently.")
     p.add_argument("--num-gpus", type=int, default=8,
                    help="Number of available GPUs (for CUDA_VISIBLE_DEVICES assignment).")
-    p.add_argument("--log-dir", type=str, default="/root/workspace/HugWBC/collector_log",
+    p.add_argument("--log-dir", type=str, default="/cpfs/user/caozhe/workspace/HugWBC/collector_log",
                    help="Directory to write per-command logs.")
 
     # === 采集器固定参数（按需改/加）===

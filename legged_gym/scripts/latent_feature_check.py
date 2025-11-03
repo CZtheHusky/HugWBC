@@ -149,7 +149,7 @@ def check_latent_feature(rb_path: str, res_save_parent: str, dirn: str, max_T_he
 
 # check_latent_feature("dataset/example_trajectories/crab_left_walk.zarr", "dataset/latent_check/constant")
 # check_latent_feature("dataset/latent_test/switch.zarr",   "dataset/latent_check/switch")
-parent_path = "/root/workspace/HugWBC/dataset/example_trajectories_test"
+parent_path = "/cpfs/user/caozhe/workspace/HugWBC/dataset/example_trajectories_test"
 for dirn in os.listdir(parent_path):
     if os.path.isdir(os.path.join(parent_path, dirn)):
         horizons = [5, 1]

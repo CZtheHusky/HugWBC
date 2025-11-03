@@ -4,7 +4,7 @@ sys.path.append(os.getcwd())
 from legged_gym import LEGGED_GYM_ROOT_DIR
 import isaacgym
 from legged_gym.envs import *
-from legged_gym.utils import get_args, task_registry, update_class_from_dict
+from legged_gym.utils import get_args, task_registry, update_class_from_dict, export_policy_as_jit
 from isaacgym import gymapi
 import numpy as np
 import torch
@@ -16,8 +16,8 @@ from isaacgym import gymapi
 def play(args):
     # 获取环境配置和训练配置
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
-    resume_path = train_cfg.runner.resume_path
-    print(resume_path)
+    train_cfg.runner.resume_path = "/cpfs/user/caozhe/workspace/HugWBC/logs/h1_interrupt/Aug21_13-31-13_/model_40000.pt"
+    # print(resume_path)
     
     # ==================== 环境参数覆盖设置 ====================
     # 覆盖训练时的环境数量，测试时只使用1个环境，便于观察和调试
@@ -87,6 +87,7 @@ def play(args):
     ppo_runner, train_cfg = task_registry.make_alg_runner(
         env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
+    # export policy as a jit module (used to run it from C++)
 
     # ==================== 相机控制配置 ====================
     cfg_eval = {
@@ -115,7 +116,12 @@ def play(args):
     # 执行一步，获取初始观察
     obs, critic_obs, _, _, _ = env.step(torch.zeros(
             env.num_envs, env.num_actions, dtype=torch.float, device=env.device))
-
+    print("obs.shape: ", obs.shape)
+    if EXPORT_POLICY:
+        exp_path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'h1_interrupt', 'exported', 'policies')
+        os.makedirs(exp_path, exist_ok=True)
+        export_policy_as_jit(ppo_runner.alg.actor_critic, exp_path, obs[..., :76].cpu().detach())
+        print('Exported policy as jit script to: ', exp_path)
     # ==================== 主循环：策略执行和相机控制 ====================
     timesteps = env_cfg.env.episode_length_s * 500 + 1
     switch_interval = 10 # 5 seconds
@@ -204,5 +210,8 @@ CANDATE_ENV_COMMANDS = {
 }
 
 if __name__ == '__main__':
+    EXPORT_POLICY = True
+    RECORD_FRAMES = False
+    MOVE_CAMERA = False
     args = get_args()
     play(args)

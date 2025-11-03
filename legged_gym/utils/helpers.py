@@ -119,6 +119,22 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
 
     return env_cfg, cfg_train
 
+def export_policy_as_jit(actor_critic, path, example_obs):
+    from rsl_rl.modules.net_model import MlpAdaptModel
+    from rsl_rl.modules.actor_critic import ActorCritic
+    if hasattr(actor_critic, "student_model_name") and 'Rnn' in actor_critic.student_model_name:
+        exporter = StudentPolicyExporter(actor_critic)
+        exporter.export(path, example_obs)
+    elif isinstance(actor_critic, ActorCritic) and isinstance(actor_critic.actor, MlpAdaptModel):
+        exporter = AsymetricPolicyExporter(actor_critic)
+        exporter.export(path, example_obs)
+    else: 
+        os.makedirs(path, exist_ok=True)
+        path = os.path.join(path, 'policy_1.pt')
+        model = copy.deepcopy(actor_critic.actor).to('cpu')
+        traced_script_module = torch.jit.script(model)
+        traced_script_module.save(path)
+
 def get_args():
     custom_parameters = [
         {"name": "--task", "type": str, "default": "h1int", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
@@ -149,4 +165,133 @@ def get_args():
         args.sim_device += f":{args.sim_device_id}"
     return args
 
+
+
+
+class StudentPolicyExporter(torch.nn.Module):
+    def __init__(self, student_policy):
+        super().__init__()
+        for para in student_policy.parameters():
+            para.requires_grad = False
+        
+        self.latent_head = copy.deepcopy(student_policy.actor.latent_head)
+        self.teacher_low_level = copy.deepcopy(student_policy.teacher_low_level)
+        self.memory = copy.deepcopy(student_policy.actor.memory_encoder.rnn)
+
+        self.proprioception_dim = student_policy.proprioception_dim
+        # self.low_level_obs_dim = student_policy.low_level_obs_dim
+        
+        self.register_buffer(f'hidden_state', torch.zeros(self.memory.num_layers, 1, self.memory.hidden_size, dtype=torch.float32))
+        self.register_buffer(f'cell_state', torch.zeros(self.memory.num_layers, 1, self.memory.hidden_size, dtype=torch.float32))
+
+    def forward(self, x):
+        low_level_obs = x
+        if low_level_obs.dim() == 3:
+            low_level_obs = low_level_obs[:,-1,:]
+
+        memory, (h,c) = self.memory(low_level_obs[..., :self.proprioception_dim].unsqueeze(0), (self.hidden_state, self.cell_state))
+        student_latent = self.latent_head(memory.squeeze(0))
+
+        low_state = torch.cat((low_level_obs, student_latent), dim=-1)
+        student_act = self.teacher_low_level(low_state)
+
+        self.hidden_state[:] = h
+        self.cell_state[:] = c
+
+        return student_act, student_latent
+
+    @torch.jit.export
+    def reset_memory(self):
+        self.hidden_state[:] = 0.
+        self.cell_state[:] = 0.
+ 
+    def export(self, path, test_input):
+        os.makedirs(path, exist_ok=True)
+        path = os.path.join(path, 'trace_jit.pt')
+        self.to('cpu')
+        self.eval()
+        test = self(test_input)
+        traced_policy = torch.jit.trace(self, test_input)
+        traced_policy.save(path)
+        # traced_script_module = torch.jit.script(self)
+        # traced_script_module.save(path)
+
+class AsymetricPolicyExporter(torch.nn.Module):
+    # The Input Policy should belongs to class Teacher
+    # And its actor should belongs to class MlpAdaptModel
+    # Treat the obs_buffer as part of the module. 
+    def __init__(self, AsymPolicy, num_envs=1):
+        super().__init__()
+        for para in AsymPolicy.parameters():
+            para.requires_grad = False
+        self.mem_encoder = copy.deepcopy(AsymPolicy.actor.mem_encoder)
+        self.state_estimator = copy.deepcopy(AsymPolicy.actor.state_estimator)
+        self.low_level_net = copy.deepcopy(AsymPolicy.actor.low_level_net)
+        self.num_envs = num_envs
+
+        self.proprioception_dim = AsymPolicy.actor.proprioception_dim
+        self.include_history_steps = AsymPolicy.actor.max_length
+        self.cmd_dim = AsymPolicy.actor.cmd_dim
+        
+        # Here we assume the obs always have num_envs = 1 for jit inferance.
+        self.register_buffer(f'pro_obs_seq', torch.zeros(num_envs, self.include_history_steps, self.proprioception_dim, dtype=torch.float32)) 
+        self.pro_obs_seq.requires_grad = False
+
+        # self.low_level_obs_dim = student_policy.low_level_obs_dim
+        # self.register_buffer(f'hidden_state', torch.zeros(self.memory.num_layers, 1, self.memory.hidden_size, dtype=torch.float32))
+        # self.register_buffer(f'cell_state', torch.zeros(self.memory.num_layers, 1, self.memory.hidden_size, dtype=torch.float32))
+
+    def forward(self, x):
+        low_level_obs = x
+        if low_level_obs.dim() == 3:
+            low_level_obs = low_level_obs[:,-1,:] # num_envs x proprioception_dim
+
+        # Update history buffer.
+        self.update_memory(low_level_obs)
+        # self.pro_obs_seq[:, :-1, :] = self.pro_obs_seq[:, 1:, :].clone()
+        # self.pro_obs_seq[:, -1, :] = low_level_obs[:, :self.proprioception_dim].clone()
+        mem = self.mem_encoder(self.pro_obs_seq.view(1, -1))
+        privileged_predict = self.state_estimator(mem)
+        cmd = low_level_obs[..., self.proprioception_dim:self.proprioception_dim+self.cmd_dim]
+        # act = self.low_level_net(torch.cat((x[..., -1, :self.proprioception_dim], mem, privileged_predict, cmd), dim=-1))
+        # act = self.low_level_net(torch.cat((mem, cmd), dim=-1))
+        jp_out = self.low_level_net(torch.cat((mem, privileged_predict, low_level_obs[..., :self.proprioception_dim], cmd), dim=-1))
+
+        return jp_out
+    
+    @torch.jit.export
+    def update_memory(self, low_level_obs):
+        tmp = torch.concatenate((self.pro_obs_seq[:, 1:, :], low_level_obs[:, :self.proprioception_dim].unsqueeze(1)),dim=1)
+        self.pro_obs_seq[:] = tmp
+
+
+    @torch.jit.export
+    def reset_memory(self):
+        self.pro_obs_seq[:] = 0
+        
+ 
+    def export(self, path, test_input):
+        os.makedirs(path, exist_ok=True)
+        self.to('cpu')
+        self.eval()
+        traced_policy = torch.jit.trace(self, test_input)
+        traced_policy.save(os.path.join(path, 'trace_jit.pt'))
+        traced_policy = torch.jit.load(os.path.join(path, 'trace_jit.pt'), map_location=test_input.device)
+        # print(traced_policy.pro_obs_seq)
+        # traced_policy.reset_memory()
+        # print(traced_policy.pro_obs_seq)
+        # import pdb; pdb.set_trace()
+        for _ in range(5):
+            test_input = torch.rand_like(test_input).to(test_input.device).to(torch.float32)
+            self(test_input)
+            traced_policy(test_input)
+        # print(self.pro_obs_seq - traced_policy.pro_obs_seq)
+        # traced_policy.reset_memory()
+        print(torch.sum(self.pro_obs_seq - traced_policy.pro_obs_seq))
+        for _ in range(20):
+            test_input = torch.rand_like(test_input).to(test_input.device).to(torch.float32)
+            test = self(test_input)
+            test_traced = traced_policy(test_input)
+            print(test-test_traced)
+            print(torch.sum(self.pro_obs_seq - traced_policy.pro_obs_seq))
 
