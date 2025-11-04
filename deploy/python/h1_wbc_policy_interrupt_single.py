@@ -110,6 +110,10 @@ def MainControlProcess(executed_interrupt_base, interrupt_flag, Control_Mode, ke
 
     robot.finalize()
 
+"""
+vglrun -d egl python h1_wbc_policy_interrupt_single.py
+"""
+
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn")
     shared_interrupt_base = Array(

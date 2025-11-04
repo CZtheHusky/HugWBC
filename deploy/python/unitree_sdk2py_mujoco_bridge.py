@@ -39,22 +39,41 @@ class UnitreeSdk2Bridge:
 
         self.num_motor = self.mj_model.nu
         self.dim_motor_sensor = MOTOR_SENSOR_NUM * self.num_motor
-        self.have_imu = False
-        self.have_frame_sensor = False
+        # Sensor presence flags (populated from sensor name->slice map below)
+        self.has_imu_quat = False
+        self.has_imu_gyro = False
+        self.has_imu_acc = False
+        self.has_frame_pos = False
+        self.has_frame_vel = False
         self.dt = self.mj_model.opt.timestep
         self.idl_type = (self.num_motor > NUM_MOTOR_IDL_GO) # 0: unitree_go, 1: unitree_hg
 
         self.joystick = None
 
-        # Check sensor
-        for i in range(self.dim_motor_sensor, self.mj_model.nsensor):
+        # Build sensor name -> slice mapping using MuJoCo's sensor_adr/sensor_dim
+        # This avoids relying on hard-coded offsets into sensordata.
+        self.sensor_slices = {}
+        for i in range(self.mj_model.nsensor):
             name = mujoco.mj_id2name(
                 self.mj_model, mujoco._enums.mjtObj.mjOBJ_SENSOR, i
             )
-            if name == "imu_quat":
-                self.have_imu_ = True
-            if name == "frame_pos":
-                self.have_frame_sensor_ = True
+            if not name:
+                continue
+            adr = int(self.mj_model.sensor_adr[i])
+            dim = int(self.mj_model.sensor_dim[i])
+            self.sensor_slices[name] = slice(adr, adr + dim)
+
+        # Populate convenience flags for commonly used sensors
+        self.has_imu_quat = "imu_quat" in self.sensor_slices
+        # Accept common alternative names if present
+        self.has_imu_gyro = ("imu_gyro" in self.sensor_slices) or ("imu_gyroscope" in self.sensor_slices)
+        self.has_imu_acc = ("imu_acc" in self.sensor_slices) or ("imu_accelerometer" in self.sensor_slices)
+        self.has_frame_pos = "frame_pos" in self.sensor_slices
+        self.has_frame_vel = "frame_vel" in self.sensor_slices
+
+        # Backward-compat aliasing (some legacy code checked these names)
+        self.have_imu = self.has_imu_quat or self.has_imu_gyro or self.has_imu_acc
+        self.have_frame_sensor = self.has_frame_pos or self.has_frame_vel
 
         # Unitree sdk2 message
         self.low_state = LowState_default()
@@ -133,40 +152,31 @@ class UnitreeSdk2Bridge:
                     i + 2 * self.num_motor
                 ]
 
-            if self.have_frame_sensor_:
+            # Fill IMU data via named sensor slices if available
+            if self.has_imu_quat:
+                sl = self.sensor_slices["imu_quat"]
+                quat = self.mj_data.sensordata[sl]
+                if quat.shape[0] >= 4:
+                    self.low_state.imu_state.quaternion[0] = quat[0]
+                    self.low_state.imu_state.quaternion[1] = quat[1]
+                    self.low_state.imu_state.quaternion[2] = quat[2]
+                    self.low_state.imu_state.quaternion[3] = quat[3]
 
-                self.low_state.imu_state.quaternion[0] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 0
-                ]
-                self.low_state.imu_state.quaternion[1] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 1
-                ]
-                self.low_state.imu_state.quaternion[2] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 2
-                ]
-                self.low_state.imu_state.quaternion[3] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 3
-                ]
+            if self.has_imu_gyro:
+                sl = self.sensor_slices.get("imu_gyro", self.sensor_slices.get("imu_gyroscope"))
+                gyro = self.mj_data.sensordata[sl]
+                if gyro.shape[0] >= 3:
+                    self.low_state.imu_state.gyroscope[0] = gyro[0]
+                    self.low_state.imu_state.gyroscope[1] = gyro[1]
+                    self.low_state.imu_state.gyroscope[2] = gyro[2]
 
-                self.low_state.imu_state.gyroscope[0] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 4
-                ]
-                self.low_state.imu_state.gyroscope[1] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 5
-                ]
-                self.low_state.imu_state.gyroscope[2] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 6
-                ]
-
-                self.low_state.imu_state.accelerometer[0] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 7
-                ]
-                self.low_state.imu_state.accelerometer[1] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 8
-                ]
-                self.low_state.imu_state.accelerometer[2] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 9
-                ]
+            if self.has_imu_acc:
+                sl = self.sensor_slices.get("imu_acc", self.sensor_slices.get("imu_accelerometer"))
+                acc = self.mj_data.sensordata[sl]
+                if acc.shape[0] >= 3:
+                    self.low_state.imu_state.accelerometer[0] = acc[0]
+                    self.low_state.imu_state.accelerometer[1] = acc[1]
+                    self.low_state.imu_state.accelerometer[2] = acc[2]
 
             if self.joystick != None:
                 pygame.event.get()
@@ -225,25 +235,37 @@ class UnitreeSdk2Bridge:
     def PublishHighState(self):
 
         if self.mj_data != None:
-            self.high_state.position[0] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 10
-            ]
-            self.high_state.position[1] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 11
-            ]
-            self.high_state.position[2] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 12
-            ]
+            # Prefer named sensor slices if available
+            if self.has_frame_pos:
+                sl = self.sensor_slices["frame_pos"]
+                pos = self.mj_data.sensordata[sl]
+                if pos.shape[0] >= 3:
+                    self.high_state.position[0] = pos[0]
+                    self.high_state.position[1] = pos[1]
+                    self.high_state.position[2] = pos[2]
+            if self.has_frame_vel:
+                sl = self.sensor_slices["frame_vel"]
+                vel = self.mj_data.sensordata[sl]
+                if vel.shape[0] >= 3:
+                    self.high_state.velocity[0] = vel[0]
+                    self.high_state.velocity[1] = vel[1]
+                    self.high_state.velocity[2] = vel[2]
 
-            self.high_state.velocity[0] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 13
-            ]
-            self.high_state.velocity[1] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 14
-            ]
-            self.high_state.velocity[2] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 15
-            ]
+            # Fallback to legacy fixed offsets if named sensors are unavailable
+            if not self.has_frame_pos:
+                try:
+                    self.high_state.position[0] = self.mj_data.sensordata[self.dim_motor_sensor + 10]
+                    self.high_state.position[1] = self.mj_data.sensordata[self.dim_motor_sensor + 11]
+                    self.high_state.position[2] = self.mj_data.sensordata[self.dim_motor_sensor + 12]
+                except Exception:
+                    pass
+            if not self.has_frame_vel:
+                try:
+                    self.high_state.velocity[0] = self.mj_data.sensordata[self.dim_motor_sensor + 13]
+                    self.high_state.velocity[1] = self.mj_data.sensordata[self.dim_motor_sensor + 14]
+                    self.high_state.velocity[2] = self.mj_data.sensordata[self.dim_motor_sensor + 15]
+                except Exception:
+                    pass
 
         self.high_state_puber.Write(self.high_state)
 
