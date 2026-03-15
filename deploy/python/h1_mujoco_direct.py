@@ -140,7 +140,7 @@ class H1MujocoDirect:
         current_jpos_des = self.get_joint_pos()
         if target_pos is None:
             target_pos = current_jpos_des
-        for _ in range(500):
+        for _ in range(50000):
             for j in range(len(target_pos)):
                 delta = np.clip(target_pos[j] - current_jpos_des[j], -self.max_joint_delta, self.max_joint_delta)
                 current_jpos_des[j] += delta

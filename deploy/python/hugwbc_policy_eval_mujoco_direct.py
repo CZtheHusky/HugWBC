@@ -56,7 +56,7 @@ def ControlRobotDirect(shared_obs_base, shared_act_base, executed_interrupt_base
     robot.finalize()
 
 """
-vglrun -d egl python hugwbc_policy_eval_mujoco_direct_mp.py
+vglrun -d egl python hugwbc_policy_eval_mujoco_direct.py
 """
 
 if __name__ == "__main__":
